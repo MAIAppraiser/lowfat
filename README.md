@@ -72,6 +72,17 @@ lowfat docker ps
 lowfat ls -la
 ```
 
+#### Option D: pi agent integration
+
+
+Add the following to your `~/.pi/agent/settings.json`:
+
+```json
+{
+  "shellCommandPrefix": "eval \"$(lowfat shell-init zsh)\"; "
+}
+```
+
 #### Intensity levels
 
 Three levels control how aggressively output is compressed:
