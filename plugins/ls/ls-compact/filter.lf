@@ -1,0 +1,15 @@
+#!/usr/bin/env lowfat-filter
+# ls-compact — compact ls output for LLM contexts
+
+define strip-noise:
+    drop /^total /
+    drop /^$/
+
+*, ultra:
+    strip-noise
+    shell: awk '{print $NF}'
+    head 40
+
+*:
+    strip-noise
+    head 40

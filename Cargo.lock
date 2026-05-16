@@ -492,6 +492,7 @@ dependencies = [
  "lowfat-runner",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

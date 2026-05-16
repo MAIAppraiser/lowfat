@@ -1,3 +1,6 @@
 [plugin]
 name = "ls-compact"
 commands = ["ls"]
+
+[runtime]
+entry = "filter.lf"

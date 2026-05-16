@@ -17,27 +17,28 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Show resolved config and validate .lowfat file
-    Config,
-    /// List enabled/disabled filters
-    Filters {
-        /// Print only command names (one per line), for shell-init
+    // ── primary inspection commands ───────────────────────────────
+    /// Show current configuration, active filters, and pipelines
+    #[command(after_help = "\
+Examples:
+  lowfat info              # status badge + active filter list
+  lowfat info git          # pipeline applied to `git`
+  lowfat info --config     # full resolved config (paths, level, env)")]
+    Info {
+        /// Show pipeline for this command (e.g., git, docker)
+        cmd: Option<String>,
+        /// Show full resolved config instead of the default view
         #[arg(long)]
-        commands: bool,
+        config: bool,
     },
-    /// Show token savings report
-    Gain,
-    /// Get or set intensity level
-    Level {
-        /// Level to set (lite, full, ultra)
-        value: Option<String>,
-    },
-    /// Show status badge
-    Status,
-    /// Show active pipeline for a command
-    Pipeline {
-        /// Command to show pipeline for (e.g., git)
-        cmd: String,
+    /// Show token savings, or recent plugin executions with --audit
+    Stats {
+        /// Show recent plugin executions instead of savings summary
+        #[arg(long)]
+        audit: bool,
+        /// Number of audit entries (only with --audit)
+        #[arg(long, default_value = "20")]
+        audit_limit: usize,
     },
     /// Local usage history (powers plugin candidate ranking)
     History {
@@ -50,12 +51,15 @@ enum Commands {
         #[command(subcommand)]
         action: Option<HistoryAction>,
     },
-    /// Show plugin audit log
-    Audit {
-        /// Number of entries to show
-        #[arg(default_value = "20")]
-        limit: usize,
+
+    // ── runtime / config ──────────────────────────────────────────
+    /// Get or set intensity level
+    Level {
+        /// Level to set (lite, full, ultra)
+        value: Option<String>,
     },
+
+    // ── integrations ──────────────────────────────────────────────
     /// Claude Code PreToolUse hook (reads JSON from stdin)
     Hook,
     /// Print shell init script for eval
@@ -68,6 +72,54 @@ enum Commands {
     Plugin {
         #[command(subcommand)]
         action: PluginAction,
+    },
+    /// Run a .lf rule file against stdin (standalone testing)
+    #[command(after_help = "\
+Examples:
+  cat sample.txt | lowfat filter cargo.lf --sub=build --level=ultra
+  cat sample.txt | lowfat filter --explain git.lf --sub=diff > /tmp/out
+  lowfat filter foo.lf --sub=status --args=\"--porcelain\" < input.txt")]
+    Filter {
+        /// Path to the .lf file
+        path: String,
+        /// Subcommand context (sets $sub for the rule)
+        #[arg(long, default_value = "")]
+        sub: String,
+        /// Intensity level
+        #[arg(long, default_value = "full")]
+        level: String,
+        /// Whitespace-separated args (sets $args)
+        #[arg(long, default_value = "")]
+        args: String,
+        /// Print per-stage diagnostics to stderr
+        #[arg(long)]
+        explain: bool,
+    },
+
+    // ── hidden backward-compat aliases ────────────────────────────
+    // Old inspection commands keep working but are hidden from help.
+    // Slated for removal one release after .lf migration.
+    #[command(hide = true)]
+    Config,
+    #[command(hide = true)]
+    Filters {
+        /// Print only command names (one per line), for shell-init
+        #[arg(long)]
+        commands: bool,
+    },
+    #[command(hide = true)]
+    Gain,
+    #[command(hide = true)]
+    Status,
+    #[command(hide = true)]
+    Pipeline {
+        /// Command to show pipeline for (e.g., git)
+        cmd: String,
+    },
+    #[command(hide = true)]
+    Audit {
+        #[arg(default_value = "20")]
+        limit: usize,
     },
 }
 
@@ -146,14 +198,15 @@ fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Some(Commands::Config) => commands::config::run(),
-        Some(Commands::Filters { commands }) => commands::filters::run(commands),
-        Some(Commands::Hook) => commands::hook::run(),
-        Some(Commands::Gain) => commands::gain::run(),
-        Some(Commands::Level { value }) => commands::level::run(value.as_deref()),
-        Some(Commands::Status) => commands::status::run(),
-        Some(Commands::Pipeline { cmd }) => commands::pipeline::run(&cmd),
-        Some(Commands::Audit { limit }) => commands::audit::run(limit),
+        // ── new consolidated inspection commands ─────────────────
+        Some(Commands::Info { cmd, config }) => {
+            commands::info::run(cmd.as_deref(), config)
+        }
+        Some(Commands::Stats { audit, audit_limit }) => {
+            commands::stats::run(audit, audit_limit)
+        }
+
+        // ── kept ─────────────────────────────────────────────────
         Some(Commands::History { limit, all, action }) => match action {
             Some(HistoryAction::Candidates { limit, all }) => commands::candidates::run(limit, all),
             Some(HistoryAction::Export) => commands::history_export::run(),
@@ -172,7 +225,16 @@ fn main() {
             }),
             None => commands::candidates::run(limit, all),
         },
+        Some(Commands::Level { value }) => commands::level::run(value.as_deref()),
+        Some(Commands::Hook) => commands::hook::run(),
         Some(Commands::ShellInit { shell }) => commands::shell_init::run(&shell),
+        Some(Commands::Filter {
+            path,
+            sub,
+            level,
+            args,
+            explain,
+        }) => commands::filter::run(&path, &sub, &level, &args, explain),
         Some(Commands::Plugin { action }) => match action {
             PluginAction::List => commands::plugin::list(),
             PluginAction::Doctor => commands::plugin::doctor(),
@@ -185,6 +247,23 @@ fn main() {
                 commands::plugin::new_plugin(&plugin_name, &command)
             }
         },
+
+        // ── hidden backward-compat aliases route to new code ─────
+        Some(Commands::Config) => commands::info::run(None, true),
+        Some(Commands::Status) => commands::info::run(None, false),
+        Some(Commands::Pipeline { cmd }) => commands::info::run(Some(&cmd), false),
+        Some(Commands::Filters { commands: cmds_only }) => {
+            // `--commands` is consumed by shell-init scripts; preserve its
+            // raw one-per-line output. Bare form is just a view of `info`.
+            if cmds_only {
+                commands::filters::run(true)
+            } else {
+                commands::info::run(None, false)
+            }
+        }
+        Some(Commands::Gain) => commands::stats::run(false, 20),
+        Some(Commands::Audit { limit }) => commands::stats::run(true, limit),
+
         None => {
             if cli.args.is_empty() {
                 commands::help::run();

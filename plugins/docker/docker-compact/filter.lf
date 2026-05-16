@@ -1,0 +1,58 @@
+#!/usr/bin/env lowfat-filter
+# docker-compact — compact docker output for LLM contexts
+
+# ── ps ────────────────────────────────────────────────────────────
+ps, ultra:
+    shell: |
+        printf 'NAME STATUS\n'
+        tail -n +2 | awk '{print $NF, $(NF-2)}' | head -n 40
+
+ps:
+    shell: sed 's/  */ /g'
+    head 40
+
+# ── images ────────────────────────────────────────────────────────
+images, ultra:
+    shell: |
+        printf 'REPO TAG SIZE\n'
+        tail -n +2 | awk '{print $1, $2, $(NF-1)}' | head -n 40
+
+images:
+    shell: sed 's/  */ /g'
+    head 40
+
+# ── logs ──────────────────────────────────────────────────────────
+logs, ultra:    tail 10
+logs, full:     tail 30
+logs:           tail 60
+
+# ── build ─────────────────────────────────────────────────────────
+build, ultra:
+    keep /^(Successfully|ERROR|ERRO)/
+    tail 3
+    else "docker build: ok"
+
+build:
+    drop /^(#[0-9]+ (CACHED|sha256:)|--->) /
+    drop /^$/
+    tail 50
+
+# ── pull ──────────────────────────────────────────────────────────
+pull, ultra:
+    keep /^(Status:|Digest:)/
+    tail 2
+    else "docker pull: ok"
+
+pull:
+    drop /^[0-9a-f]+: (Pulling|Waiting|Downloading|Extracting|Verifying|Pull complete)/
+    head 10
+
+# ── compose ───────────────────────────────────────────────────────
+compose:
+    drop /^(Pulling|Creating|Starting|Waiting) /
+    drop /^$/
+    head 30
+
+# ── default ───────────────────────────────────────────────────────
+*:
+    head 40

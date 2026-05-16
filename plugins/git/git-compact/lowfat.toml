@@ -2,3 +2,6 @@
 name = "git-compact"
 commands = ["git"]
 subcommands = ["status", "diff", "log", "show"]
+
+[runtime]
+entry = "filter.lf"

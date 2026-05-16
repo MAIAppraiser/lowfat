@@ -1,0 +1,11 @@
+[plugin]
+name = "kubectl-compact"
+commands = ["kubectl"]
+subcommands = ["get", "logs", "events", "describe", "top"]
+
+[runtime]
+entry = "filter.lf"
+
+[runtime.requires]
+python = ">=3.10"
+uv = "*"

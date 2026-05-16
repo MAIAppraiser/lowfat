@@ -1,6 +1,9 @@
 use anyhow::Result;
 use lowfat_core::config::RunfConfig;
+use lowfat_core::lf::{self, Op};
 use lowfat_plugin::discovery::discover_plugins;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 pub fn list() -> Result<()> {
     let config = RunfConfig::resolve();
@@ -38,26 +41,183 @@ pub fn doctor() -> Result<()> {
         return Ok(());
     }
 
+    let uv_available = is_on_path("uv");
+    let python_available = is_on_path("python3");
+
     let mut ready = 0;
     let mut total = 0;
+    let mut needs_uv = false;
+    let mut prewarmed = 0;
 
     for plugin in &plugins {
         total += 1;
         let name = &plugin.manifest.plugin.name;
-
-        // Check entry file exists
         let entry_path = plugin.base_dir.join(&plugin.manifest.runtime.entry);
         if !entry_path.exists() {
-            println!("  {name}    x entry not found: {}", entry_path.display());
+            println!("  {name:<24} x entry not found: {}", entry_path.display());
             continue;
         }
 
-        println!("  {name}    ok ready");
-        ready += 1;
+        let requires = &plugin.manifest.runtime.requires;
+        if requires.contains_key("uv") {
+            needs_uv = true;
+        }
+
+        let is_lf = entry_path
+            .extension()
+            .map(|e| e == "lf")
+            .unwrap_or(false);
+        if !is_lf {
+            println!("  {name:<24} ok (shell)");
+            ready += 1;
+            continue;
+        }
+
+        // Parse .lf to verify syntactic validity
+        let source = match std::fs::read_to_string(&entry_path) {
+            Ok(s) => s,
+            Err(e) => {
+                println!("  {name:<24} x cannot read: {e}");
+                continue;
+            }
+        };
+        let rs = match lf::parse(&source) {
+            Ok(r) => r,
+            Err(e) => {
+                println!("  {name:<24} x parse error: {e:#}");
+                continue;
+            }
+        };
+
+        // Collect python bodies with PEP 723 headers for prewarming
+        let pep723_bodies = collect_pep723_bodies(&rs);
+        if pep723_bodies.is_empty() {
+            println!("  {name:<24} ok (.lf, {} rules)", rs.rules.len());
+            ready += 1;
+            continue;
+        }
+        if !uv_available {
+            println!(
+                "  {name:<24} ! needs uv to resolve {} PEP 723 body(ies)",
+                pep723_bodies.len()
+            );
+            continue;
+        }
+
+        let mut all_ok = true;
+        for (i, body) in pep723_bodies.iter().enumerate() {
+            match prewarm_uv(body) {
+                Ok(_) => prewarmed += 1,
+                Err(e) => {
+                    println!(
+                        "  {name:<24} x PEP 723 body #{}: {e:#}",
+                        i + 1
+                    );
+                    all_ok = false;
+                    break;
+                }
+            }
+        }
+        if all_ok {
+            println!(
+                "  {name:<24} ok (.lf, {} rules, {} uv env(s) cached)",
+                rs.rules.len(),
+                pep723_bodies.len()
+            );
+            ready += 1;
+        }
     }
 
     println!();
-    println!("  {ready}/{total} plugins ready.");
+    println!("  {ready}/{total} plugins ready, {prewarmed} uv env(s) warmed.");
+    if needs_uv && !uv_available {
+        println!();
+        println!("  ! uv not on PATH — required by at least one plugin.");
+        println!("    install: curl -LsSf https://astral.sh/uv/install.sh | sh");
+        println!("    or:      brew install uv");
+    }
+    if !python_available {
+        println!();
+        println!("  ! python3 not on PATH — `python:` blocks will fail.");
+    }
+    Ok(())
+}
+
+fn is_on_path(cmd: &str) -> bool {
+    Command::new(cmd)
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Walk the ruleset and collect every `python:` body that declares
+/// PEP 723 inline dependencies. Includes bodies inside macro definitions
+/// and inside `split` sub-chains.
+fn collect_pep723_bodies(rs: &lf::RuleSet) -> Vec<String> {
+    let mut out = Vec::new();
+    for d in &rs.defines {
+        walk_ops(&d.ops, &mut out);
+    }
+    for r in &rs.rules {
+        walk_ops(&r.ops, &mut out);
+    }
+    out
+}
+
+fn walk_ops(ops: &[Op], out: &mut Vec<String>) {
+    for op in ops {
+        match op {
+            Op::Python(body) => {
+                if body
+                    .lines()
+                    .any(|l| l.trim_start().starts_with("# /// script"))
+                {
+                    out.push(body.clone());
+                }
+            }
+            Op::Split { pre, post, .. } => {
+                walk_ops(pre, out);
+                walk_ops(post, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Trigger uv dep resolution by running the script with empty stdin.
+/// uv caches resolved envs at `~/.cache/uv/`, so the first real invocation
+/// hits a warm cache.
+fn prewarm_uv(body: &str) -> Result<()> {
+    let mut script = tempfile::Builder::new()
+        .prefix("lowfat-doctor-")
+        .suffix(".py")
+        .tempfile()?;
+    script.write_all(body.as_bytes())?;
+    script.flush().ok();
+    let path = script.path().to_str().unwrap().to_string();
+
+    let mut child = Command::new("uv")
+        .args(["run", "--script", &path])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    // Empty stdin: many scripts will exit immediately on stdin.read(); deps
+    // are resolved during uv's startup regardless of script behavior.
+    drop(child.stdin.take());
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        // Non-zero exit from the script body itself is fine — what we care
+        // about is whether uv could resolve the env. Distinguish by checking
+        // stderr for uv-level errors vs. script tracebacks.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("error:") && !stderr.contains("Traceback") {
+            anyhow::bail!("uv: {}", stderr.lines().next().unwrap_or("").trim());
+        }
+    }
     Ok(())
 }
 

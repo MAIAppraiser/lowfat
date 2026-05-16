@@ -2,3 +2,6 @@
 name = "docker-compact"
 commands = ["docker"]
 subcommands = ["ps", "images", "logs", "build", "pull", "compose"]
+
+[runtime]
+entry = "filter.lf"

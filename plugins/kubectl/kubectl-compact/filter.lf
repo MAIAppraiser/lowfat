@@ -1,0 +1,72 @@
+#!/usr/bin/env lowfat-filter
+# kubectl-compact — compact kubectl output for LLM contexts
+# env: $sub $level $exit $args
+
+# kubectl get -o yaml dumps server-side fields (managedFields,
+# resourceVersion, generation, creationTimestamp) that drown the
+# manifest. Real YAML parsing beats regex: annotations and
+# descriptions can contain anything, including `---` and indentation
+# that breaks line-based filters.
+define clean-yaml:
+    python: |
+        # /// script
+        # requires-python = ">=3.10"
+        # dependencies = ["pyyaml>=6"]
+        # ///
+        import sys, yaml
+
+        DROP = {"managedFields", "resourceVersion", "generation",
+                "creationTimestamp", "uid", "selfLink",
+                "ownerReferences"}
+
+        def prune(node):
+            if isinstance(node, dict):
+                if "annotations" in node:
+                    node["annotations"] = f"<{len(node['annotations'])} entries>"
+                return {k: prune(v) for k, v in node.items()
+                        if k not in DROP}
+            if isinstance(node, list):
+                return [prune(x) for x in node]
+            return node
+
+        raw = sys.stdin.read()
+        try:
+            docs = list(yaml.safe_load_all(raw))
+        except yaml.YAMLError:
+            sys.stdout.write(raw)            # passthrough non-YAML
+            sys.exit(0)
+
+        for d in docs:
+            if d is None: continue
+            yaml.safe_dump(prune(d), sys.stdout,
+                           default_flow_style=False, sort_keys=False)
+            print("---")
+
+# ── get ───────────────────────────────────────────────────────────
+# clean-yaml self-detects YAML vs. plain tables, so no conditional
+# dispatch needed — table output passes through unchanged.
+get:
+    clean-yaml
+    head 200
+
+# ── logs ──────────────────────────────────────────────────────────
+logs, ultra:
+    keep /ERROR|FATAL|panic|Exception/
+    tail 30
+    else "no errors in window"
+
+logs:
+    drop /^\s*$/
+    tail 60
+
+# ── events ────────────────────────────────────────────────────────
+events, ultra:
+    keep /Warning|Error/
+    tail 20
+
+events:
+    tail 40
+
+# ── default ───────────────────────────────────────────────────────
+*:
+    head 30

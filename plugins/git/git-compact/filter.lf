@@ -1,0 +1,72 @@
+#!/usr/bin/env lowfat-filter
+# git-compact — compact git output for LLM contexts
+# env: $sub $level $exit $args
+
+# ── shared helpers ────────────────────────────────────────────────
+define strip-trailers:
+    drop /^[[:space:]]*(Signed-off-by|Co-authored-by|Change-Id|Reviewed-by|Acked-by|Tested-by|Reported-by|Cc):/
+
+define abbrev-hash:
+    shell: sed -E 's/^commit ([0-9a-f]{12})[0-9a-f]{28}/commit \1/'
+
+# State machine: drop pre-hunk metadata (--- +++ index mode), drop
+# unchanged context, strip @@ function-context tail when ultra.
+define compact-diff(limit):
+    shell: |
+        awk -v lim=$1 -v lvl=$level '
+          BEGIN { in_hunk=0; n=0 }
+          n>=lim { exit }
+          /^diff / { in_hunk=0; print; n++; next }
+          /^@@ /  { in_hunk=1
+                    if (lvl=="ultra" && match($0,/ @@/))
+                        print substr($0,1,RSTART+2)
+                    else print
+                    n++; next }
+          lvl=="ultra" { next }
+          in_hunk && /^[+-]/ { print; n++ }
+        '
+
+# ── status ────────────────────────────────────────────────────────
+status:
+    keep /^\s*[MADRCU?!] /
+    head 30
+    else "git status: clean"
+
+# ── diff ──────────────────────────────────────────────────────────
+diff, ultra:    compact-diff 30     else-shell: awk 'NF' | head -50
+diff, lite:     compact-diff 400    else-shell: awk 'NF' | head -50
+diff:           compact-diff 200    else-shell: awk 'NF' | head -50
+
+# ── log ───────────────────────────────────────────────────────────
+log, ultra:
+    keep /^(commit |    )/
+    strip-trailers
+    abbrev-hash
+    head 10
+
+log:
+    strip-trailers
+    abbrev-hash
+    head 25
+
+# ── show ──────────────────────────────────────────────────────────
+show, ultra:
+    keep /^(commit |Author:|Date:|    |diff --git)/
+    strip-trailers
+    abbrev-hash
+    head 20
+
+# Full/lite: split at first `diff `, run separate chains on each half.
+show:
+    split /^diff /
+    pre:
+        keep /^(commit |Merge:|Author:|Date:|    )/
+        strip-trailers
+        abbrev-hash
+    post:
+        compact-diff 100
+    head 100
+
+# ── default ───────────────────────────────────────────────────────
+*:
+    head 30

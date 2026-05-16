@@ -1,5 +1,6 @@
 pub mod audit;
 pub mod config;
+pub mod filter;
 pub mod filters;
 pub mod gain;
 pub mod help;
@@ -7,9 +8,11 @@ pub mod candidates;
 pub mod history_export;
 pub mod history_prune;
 pub mod hook;
+pub mod info;
 pub mod level;
 pub mod pipeline;
 pub mod plugin;
 pub mod run;
 pub mod shell_init;
+pub mod stats;
 pub mod status;

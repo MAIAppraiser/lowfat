@@ -1,0 +1,75 @@
+#!/usr/bin/env lowfat-filter
+# cargo-compact — compact cargo output for LLM contexts
+
+define strip-compiling:
+    drop /^\s*(Compiling|Downloading|Checking|Blocking|Updating|Locking) /
+
+# ── build / check ─────────────────────────────────────────────────
+build|check, ultra:
+    keep /^(error|warning)\b/
+    head 15
+    else-shell: printf 'cargo %s: ok' "$sub"
+
+build|check, lite:
+    strip-compiling
+    head 60
+
+build|check:
+    strip-compiling
+    head 30
+
+# ── test ──────────────────────────────────────────────────────────
+test, ultra:
+    keep /^(test result:|failures:|test .+ FAILED|     Running|FAILED)/
+    head 15
+
+test, lite:
+    drop /^\s*(Compiling|Downloading|Checking|Blocking|Updating|Locking) |\.\.\.+ ok$/
+    head 60
+
+test:
+    drop /^\s*(Compiling|Downloading|Checking|Blocking|Updating|Locking) |\.\.\.+ ok$/
+    head 30
+
+# ── clippy ────────────────────────────────────────────────────────
+# Loses the trailing "N warnings generated" summary the shell version
+# appended; trade-off for keeping the rule declarative.
+clippy, ultra:
+    keep /^(error|warning)\b/
+    drop /generated/
+    head 15
+    else "cargo clippy: ok"
+
+clippy, lite:
+    strip-compiling
+    head 60
+
+clippy:
+    strip-compiling
+    head 30
+
+# ── run ───────────────────────────────────────────────────────────
+run, ultra:
+    drop /^\s*(Compiling|Finished|Running) /
+    head 15
+
+run, lite:
+    drop /^\s*(Compiling|Finished|Running) /
+    head 60
+
+run:
+    drop /^\s*(Compiling|Finished|Running) /
+    head 30
+
+# ── add / update ──────────────────────────────────────────────────
+add|update, ultra:
+    keep /(Adding|Removing|Updating|Locking)/
+    head 10
+    else-shell: printf 'cargo %s: ok' "$sub"
+
+add|update:
+    head 30
+
+# ── default ───────────────────────────────────────────────────────
+*:
+    head 30

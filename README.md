@@ -7,8 +7,6 @@
 
 lowfat is a lightweight CLI tool that reduces AI token costs by filtering unnecessary CLI output before it reaches your agent.
 
-Wrap commands as shell functions and pipe them through composable processors like `grep`, `cut`, `head`, and `token-budget`.
-
 <p align="center">
   <img src="docs/demo.gif" alt="lowfat demo: git diff before and after" width="700">
 </p>
@@ -20,137 +18,7 @@ Wrap commands as shell functions and pipe them through composable processors lik
 - **Composable** — UNIX-style pipes, mix built-ins and your own filters; not magic.
 - **User-owned** — `lowfat history` shows what you run most; allow you to customize for your usecase.
 
-### Install
-
-```sh
-cargo install lowfat
-# or
-brew install zdk/tools/lowfat
-```
-
-Pre-built binaries are also available on [GitHub Releases](https://github.com/zdk/lowfat/releases).
-
-### Setup
-
-Choose one of the following:
-
-#### Option A: Claude Code hook
-
-Add to `.claude/settings.json`:
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "lowfat hook"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-#### Option B: Shell integration
-
-```sh
-echo 'eval "$(lowfat shell-init zsh)"' >> ~/.zshrc   # or ~/.bashrc
-```
-
-Activates automatically inside agent environments (`CLAUDECODE=1`, `CODEX_ENV`) — commands run normally otherwise.
-
-#### Option C: Direct usage
-
-```sh
-lowfat git status
-lowfat docker ps
-lowfat ls -la
-```
-
-#### Option D: pi agent integration
-
-
-Add the following to your `~/.pi/agent/settings.json`:
-
-```json
-{
-  "shellCommandPrefix": "eval \"$(lowfat shell-init zsh)\"; "
-}
-```
-
-#### Intensity levels
-
-Three levels control how aggressively output is compressed:
-
-```sh
-lowfat level              # show current level
-lowfat level ultra        # set to ultra (most aggressive)
-LOWFAT_LEVEL=lite lowfat git log  # per-command override
-```
-
-| Level   | Behavior                             |
-| ------- | ------------------------------------ |
-| `lite`  | Gentle — keeps most context          |
-| `full`  | Default — balanced filtering         |
-| `ultra` | Maximum compression — minimal output |
-
-#### Inspecting state
-
-| Command          | Shows                                 |
-| ---------------- | ------------------------------------- |
-| `config`         | resolved config, validates `.lowfat`  |
-| `filters`        | enabled/disabled filters              |
-| `pipeline <cmd>` | active pipeline for a command         |
-| `gain`           | lifetime token savings report         |
-| `history`        | plugin candidates, ranked (see below) |
-| `audit`          | recent plugin executions              |
-| `status`         | compact status badge                  |
-
-### Config file
-
-Optional. Create a `.lowfat` file in your project root (or any parent directory — lowfat walks up to find it). All built-in filters and plugins are active by default.
-
-```sh
-# Set intensity level (default: full)
-level=ultra
-
-# Filter any command with a pipeline
-pipeline.deploy = grep:^(Deploy|ERROR|FAIL) | head:10
-```
-
-All settings:
-
-```sh
-level=ultra                # lite, full (default), ultra
-disable=npm,cargo          # disable specific filters (default: none)
-filters=git,docker         # whitelist mode — only these active (default: all)
-pipeline.<cmd> = ...       # per-command pipeline
-pipeline.<cmd>.error = ... # when exit code != 0
-pipeline.<cmd>.empty = ... # when output is empty
-pipeline.<cmd>.large = ... # when output > 10KB
-```
-
-`disable` and `filters` are mutually exclusive — use one or the other, not both.
-
-Run `lowfat config` to see the resolved config and validate your `.lowfat` file.
-
-All settings can also be overridden with environment variables:
-
-| Env var          | Effect                                                           |
-| ---------------- | ---------------------------------------------------------------- |
-| `LOWFAT_LEVEL`   | Override level (`lite`, `full`, `ultra`)                         |
-| `LOWFAT_DISABLE` | Comma-separated filters to disable                               |
-| `LOWFAT_HOME`    | Plugin/config home (default: `~/.lowfat`)                        |
-| `LOWFAT_DATA`    | Data directory for history db (default: `~/.local/share/lowfat`) |
-
-Env vars take priority over `.lowfat` file. History and gain data live at `$LOWFAT_DATA/history.db` (default `~/.local/share/lowfat/history.db`) — delete the file to reset.
-
-### Token savings
+### Token savings on real commands
 
 | Command        | Raw    | Filtered | Saved   |
 | -------------- | ------ | -------- | ------- |
@@ -160,170 +28,81 @@ Env vars take priority over `.lowfat` file. History and gain data live at `$LOWF
 | `docker ps`    | 271t   | 41t      | **85%** |
 | `ls -la`       | 192t   | 30t      | **84%** |
 
-### Find plugin gaps
-
-`lowfat history` ranks your real usage by `cost = runs × avg tokens × (1 − savings)` so commands that run often, produce a lot of output, and aren't being trimmed yet float to the top — exactly the ones worth writing (or tightening) a plugin for.
-
-```
-  #  command                    runs   avg raw      cost   savings  source    status  volume
-  1  ls                         299x        91     27.3K     51.2%  built-in  good    ██████████
-  2  git show                    32x       608     19.5K     39.5%  built-in  good    █████████░
-  3  git                         74x       770     57.0K     83.6%  built-in  good    ███████░░░
-  4  docker                      68x      4.7K    320.1K     97.4%  built-in  good    ██████░░░░
-  5  git diff                    27x       234      6.3K     15.9%  built-in  weak    ████░░░░░░
-  6  git log                     33x       137      4.5K     32.3%  built-in  good    ██░░░░░░░░
-  7  terraform                    7x       544      3.8K     33.2%  plugin    good    ██░░░░░░░░
-  8  kubectl                     10x       248      2.5K      7.4%  plugin    weak    ██░░░░░░░░
-  9  docker compose              22x       979     21.5K     89.4%  built-in  good    ██░░░░░░░░
- 10  docker images                4x      1.3K      5.3K     63.8%  built-in  good    █░░░░░░░░░
- 11  docker ps                    9x       321      2.9K     47.7%  built-in  good    █░░░░░░░░░
- 12  git commit                  11x       114      1.3K      0.0%  built-in  weak    █░░░░░░░░░
- 13  git status                  40x       115      4.6K     74.6%  built-in  good    █░░░░░░░░░
- 14  git push                    12x        50       602      3.3%  built-in  weak    ░░░░░░░░░░
- 15  terraform plan               4x       336      1.3K     60.1%  plugin    good    ░░░░░░░░░░
- 16  docker pull                  7x        78       544     20.2%  built-in  good    ░░░░░░░░░░
- 17  kubectl get                  4x        54       215      0.0%  plugin    weak    ░░░░░░░░░░
- 18  git tag                      7x        21       150      0.7%  built-in  weak    ░░░░░░░░░░
- 19  git checkout                 4x        32       126      0.0%  built-in  weak    ░░░░░░░░░░
- 20  git remote                   4x        15        60      0.0%  built-in  weak    ░░░░░░░░░░
-
-total: 479.6K raw → 413.4K saved (86.2%)
-```
-
-`weak`-status rows are the best targets — high cost relative to current savings. `source` shows whether trimming is coming from a built-in or an external plugin. Only `command` + first non-flag arg is stored locally (capped at 10k rows) — never full arguments, output, or secrets.
-
-Prune selectively when the table gets noisy (lifetime `gain` totals are kept intact):
+### Install
 
 ```sh
-lowfat history prune                    # default: --older-than 90d
-lowfat history prune --older-than 30d   # 30d, 2w, 3m accepted
-lowfat history prune --below 2          # drop one-off commands
-lowfat history prune --kept-by-plugin   # drop groups already handled by a plugin
-lowfat history prune --all              # wipe all invocation rows
-lowfat history prune --dry-run [...]    # preview without deleting
+cargo install lowfat
+# or
+brew install zdk/tools/lowfat
 ```
 
-### Filtering any command
+Pre-built binaries on [GitHub Releases](https://github.com/zdk/lowfat/releases).
 
-Add a one-liner to `.lowfat` — no plugin needed:
+### Setup
 
-```
-# Your deploy script dumps a wall of rollout text
-pipeline.deploy = grep:^(Deploy|ERROR|FAIL|Migrating) | head:10
+Pick one of:
 
-# Custom test runner with non-standard output
-pipeline.run-tests = grep:✗|failed|error|^\[suite\] | head:20
+**Claude Code hook** — add to `.claude/settings.json`:
 
-# Internal CLI with wide tables — only show what's broken
-pipeline.acme = grep:degraded|down|error|total | head:10
-
-# Log viewer spitting thousands of lines
-pipeline.stern = grep:ERROR|WARN|panic|fatal | head:30
-
-# CI script that prints every step
-pipeline.ci-run = grep:^(STEP|PASS|FAIL|ERROR) | head:20
-
-# Linter with lots of "ok" files
-pipeline.lint = grep-v:^✓ | head:30
-
-# Database migration tool
-pipeline.migrate = grep:^(Migrating|Applied|Error|Already) | head:15
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "lowfat hook" }] }
+    ]
+  }
+}
 ```
 
-The command name matches what you pass to `lowfat`: `lowfat deploy args...`, `lowfat run-tests --suite integration`, etc. Command names must not contain dots (`.` separates command from condition suffix).
-
-#### Conditional pipelines
-
-Use `.error`, `.empty`, `.large` suffixes to handle different output states:
-
-```
-pipeline.deploy = grep:complete|updated | head:5
-pipeline.deploy.error = head:50                          # exit code != 0
-pipeline.deploy.empty = passthrough                      # no output
-pipeline.deploy.large = grep:ERROR|FAIL | token-budget:500  # output > 10KB
-```
-
-#### Built-in processors
-
-| Processor        | Syntax                 | Description                                           |
-| ---------------- | ---------------------- | ----------------------------------------------------- |
-| `grep`           | `grep:pattern`         | Keep lines matching regex                             |
-| `grep-v`         | `grep-v:pattern`       | Remove lines matching regex                           |
-| `head`           | `head:N`               | First N lines                                         |
-| `truncate`       | `truncate:N`           | First N characters per line                           |
-| `cut`            | `cut:1,3` or `cut:2-5` | Extract fields (`cut:,;1,3` for comma delimiter)      |
-| `strip-ansi`     | `strip-ansi`           | Remove ANSI escape codes                              |
-| `token-budget`   | `token-budget:N`       | Trim to ~N tokens                                     |
-| `dedup-blank`    | `dedup-blank`          | Collapse consecutive blank lines                      |
-| `normalize`      | `normalize`            | Trim whitespace, collapse blanks (runs automatically) |
-| `redact-secrets` | `redact-secrets`       | Mask API keys, tokens, passwords                      |
-
-### Plugins
-
-For command-specific filtering beyond built-in processors, plugins are shell scripts that read raw output from stdin and write filtered output to stdout.
-
-Bundled plugins: `git-compact`, `docker-compact`, `ls-compact`, `npm-compact`, `go-compact`, `cargo-compact`
+**Shell integration** — auto-activates inside agent environments (`CLAUDECODE=1`, `CODEX_ENV`):
 
 ```sh
-lowfat plugin list              # list installed plugins
-lowfat plugin new terraform     # scaffold a new plugin
-lowfat plugin bench terraform   # benchmark against sample files
-lowfat plugin doctor            # check plugin health
+echo 'eval "$(lowfat shell-init zsh)"' >> ~/.zshrc   # or ~/.bashrc
 ```
 
-`lowfat plugin new terraform` creates `~/.lowfat/plugins/terraform/terraform-compact/` with:
+**Direct usage** — prefix any command:
 
-```
-lowfat.toml     # manifest: name, commands, runtime
-filter.sh       # your filter logic (stdin → stdout)
-samples/        # sample outputs for benchmarking
-```
-
-Plugins receive context via environment variables: `$LOWFAT_LEVEL`, `$LOWFAT_COMMAND`, `$LOWFAT_SUBCOMMAND`, `$LOWFAT_ARGS`, `$LOWFAT_EXIT_CODE`.
-
-`$LOWFAT_ARGS` contains all arguments (e.g., `get pods -n kube-system`) — use it when the subcommand alone isn't enough to decide how to filter. See [docs/PLUGINS.md](docs/PLUGINS.md) for examples.
-
-Plugins can be mixed with built-in processors in pipelines:
-
-```
-pipeline.git = strip-ansi | git-compact | truncate:100
+```sh
+lowfat git status
+lowfat docker ps
+lowfat ls -la
 ```
 
-#### Building a plugin with an AI agent
+**pi agent** — in `~/.pi/agent/settings.json`:
 
-Copy-paste this prompt into Claude Code (or another tool-using agent) and replace `<COMMAND>`:
-
-```
-Create a lowfat plugin to filter `<COMMAND>` output for LLM contexts.
-
-Before writing code:
-1. Read docs/PLUGINS.md to learn the manifest schema, env-var contract,
-   and per-level expectations.
-2. Ask me: which subcommands to specialize, and what's noise vs. signal
-   in this command's output.
-
-Scaffold at `~/.lowfat/plugins/<COMMAND>/<COMMAND>-compact/`:
-- `lowfat.toml` — manifest with `commands` (any aliases too) and the
-  agreed `subcommands` list
-- `filter.sh` — POSIX sh, `chmod +x`, reads stdin → writes stdout
-
-Filter contract:
-- `LOWFAT_LEVEL=ultra` → verdict line(s) only
-- `LOWFAT_LEVEL=full`  → strip noise (progress chatter, banner prose),
-                         keep diffs / errors / structure
-- `LOWFAT_LEVEL=lite`  → gentle trim, higher row caps
-- Non-zero `$LOWFAT_EXIT_CODE` → be conservative; preserve error blocks
-- Use `$LOWFAT_SUBCOMMAND`, fall back to walking `$LOWFAT_ARGS` when you
-  need flags or resource type
-
-Verify:
-- `lowfat plugin doctor`            (registers cleanly)
-- Drop real captures in `samples/<command>-<sub>-full.txt`
-- `lowfat plugin bench <name>`      (aim ≥80% at full on noisy commands)
-- Smoke-test: `lowfat <COMMAND> ...` against a real run
+```json
+{ "shellCommandPrefix": "eval \"$(lowfat shell-init zsh)\"; " }
 ```
 
-The agent will ask you what counts as noise — answer with sample output if you have it, then iterate on the bench numbers.
+### Usage highlights
+
+```sh
+# See what's configured and how loud each filter is being
+lowfat info                       # status badge + active filters
+lowfat info git                   # pipeline for `git`
+lowfat info --config              # full resolved config
+
+# See what lowfat has saved you
+lowfat stats                      # lifetime token savings
+lowfat stats --audit              # recent plugin executions
+lowfat history                    # rank commands by potential savings
+
+# Dial the aggressiveness
+lowfat level ultra                # max compression
+LOWFAT_LEVEL=lite lowfat git log  # one-off override
+
+# Write a plugin
+lowfat plugin new terraform       # scaffold ~/.lowfat/plugins/terraform/
+lowfat plugin doctor              # check plugins (and pre-install any Python deps)
+
+# Test a plugin against a sample without installing it
+cat samples/git-diff-full.txt | lowfat filter --explain ./filter.lf --sub=diff --level=ultra
+```
+
+### Learn more
+
+- **[docs/CONFIG.md](docs/CONFIG.md)** — `.lowfat` file, env vars, pipeline DSL, built-in processors, the `history` ranking
+- **[docs/PLUGINS.md](docs/PLUGINS.md)** — `.lf` rule DSL, shell escape hatches, PEP 723 + uv, AI agent prompt
 
 ## Alternatives
 

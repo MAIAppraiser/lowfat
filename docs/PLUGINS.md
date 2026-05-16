@@ -1,10 +1,17 @@
 # Writing a lowfat plugin
 
-Most commands can be filtered with a one-liner in `.lowfat` (see [README](../README.md#filtering-any-command)). Write a plugin only when pipeline config can't express what you need:
+Most commands can be filtered with a one-liner in `.lowfat` (see [CONFIG.md](CONFIG.md#filtering-any-command-without-writing-a-plugin)). Write a plugin only when pipeline config can't express what you need:
 
 - **Per-subcommand logic** — different subcommands produce completely different output
 - **Conditional output** — show "ok" when clean, show errors when not
 - **Context-aware filtering** — different behavior based on flags or arguments
+
+A plugin lives at `~/.lowfat/plugins/<category>/<name>/` and ships in one of two formats:
+
+| Format | When to use |
+|---|---|
+| **`filter.lf`** | Default for new plugins. Declarative rules parsed in-process; shell + python escape hatches for the rare cases that can't be expressed in built-in ops. |
+| **`filter.sh`** | Legacy. POSIX shell script reading stdin → writing stdout. Still supported; the manifest's `runtime.entry` decides which one runs. |
 
 ## Quick start
 
@@ -17,242 +24,306 @@ This creates:
 ```
 ~/.lowfat/plugins/kubectl/kubectl-compact/
   lowfat.toml     # manifest
-  filter.sh       # your filter (edit this)
+  filter.lf       # rule file (edit this)
   samples/        # paste real output here for benchmarking
 ```
 
-## Step 1: Edit the manifest
+Edit the manifest:
 
 ```toml
 [plugin]
 name = "kubectl-compact"
 commands = ["kubectl"]
 subcommands = ["get", "describe", "logs", "apply"]
+
+[runtime]
+entry = "filter.lf"
 ```
 
-- `commands` — the top-level command (e.g., `kubectl`)
+- `commands` — top-level command(s) intercepted (e.g., `kubectl`)
 - `subcommands` — which subcommands this plugin handles (omit to handle all)
+- `runtime.entry` — `filter.lf` or `filter.sh`
 
-## Step 2: Write the filter
+---
 
-Your script receives:
+# The `.lf` DSL
 
-| Env var | Value | Example (`lowfat kubectl get pods -n kube-system -o wide`) |
-|---------|-------|------|
-| `$LOWFAT_COMMAND` | top-level command | `kubectl` |
-| `$LOWFAT_SUBCOMMAND` | first argument | `get` |
-| `$LOWFAT_ARGS` | all arguments joined by space | `get pods -n kube-system -o wide` |
-| `$LOWFAT_LEVEL` | `lite`, `full`, or `ultra` | `full` |
-| `$LOWFAT_EXIT_CODE` | command's exit code | `0` |
-| stdin | raw command output | *(the full kubectl output)* |
+A `.lf` file is a sequence of `define` blocks and `rule` blocks. The runner picks the first rule whose selector matches `(subcommand, level)` and runs its ops top-to-bottom.
 
-`$LOWFAT_SUBCOMMAND` is just the first arg — good enough for most plugins. Use `$LOWFAT_ARGS` when you need to inspect deeper arguments (resource type, flags, output format, etc.).
+## Selectors
 
-Write filtered output to stdout. If you output nothing, lowfat passes through the original.
-
-### Example: kubectl-compact/filter.sh
-
-This shows how to use `$LOWFAT_ARGS` to handle resource-type-specific filtering:
-
-```sh
-#!/bin/sh
-# kubectl-compact — compact kubectl output for LLM contexts
-
-RAW=$(cat)
-LEVEL="${LOWFAT_LEVEL:-full}"
-SUB="${LOWFAT_SUBCOMMAND}"
-ARGS="${LOWFAT_ARGS}"
-
-# Extract resource type from args: "get pods -n foo" → "pods"
-# Skip flags (starting with -) to find the resource type
-RESOURCE=""
-for arg in $ARGS; do
-  case "$arg" in
-    "$SUB") continue ;;           # skip subcommand itself
-    -*) continue ;;               # skip flags
-    *) RESOURCE="$arg"; break ;;  # first non-flag = resource type
-  esac
-done
-
-# Detect -o json/yaml (structured output should pass through)
-case "$ARGS" in
-  *"-o json"*|*"-o yaml"*|*"--output json"*|*"--output yaml"*)
-    echo "$RAW"
-    exit 0
-    ;;
-esac
-
-case "$SUB" in
-  get)
-    case "$RESOURCE" in
-      pods|po)
-        if [ "$LEVEL" = "ultra" ]; then
-          # Header + non-Running pods (problems only)
-          echo "$RAW" | awk 'NR==1 || !/Running/' | head -n 15
-        else
-          LIMIT=$( [ "$LEVEL" = "lite" ] && echo 60 || echo 30 )
-          echo "$RAW" | cut -c1-100 | head -n "$LIMIT"
-        fi
-        ;;
-      events|ev)
-        if [ "$LEVEL" = "ultra" ]; then
-          # Warning events only
-          echo "$RAW" | awk 'NR==1 || /Warning/' | head -n 15
-        else
-          echo "$RAW" | tail -n 30
-        fi
-        ;;
-      *)
-        # Generic table: trim width, limit rows
-        LIMIT=$( [ "$LEVEL" = "lite" ] && echo 60 || echo 30 )
-        echo "$RAW" | cut -c1-120 | head -n "$LIMIT"
-        ;;
-    esac
-    ;;
-  describe)
-    if [ "$LEVEL" = "ultra" ]; then
-      echo "$RAW" | grep -E '^(Name:|Namespace:|Status:|Type:|Reason:|Message:|  [A-Z])' | head -n 20
-    else
-      LIMIT=$( [ "$LEVEL" = "lite" ] && echo 80 || echo 40 )
-      echo "$RAW" | head -n "$LIMIT"
-    fi
-    ;;
-  logs)
-    case "$LEVEL" in
-      ultra) echo "$RAW" | grep -iE 'error|warn|fatal|panic' | head -n 15 ;;
-      lite)  echo "$RAW" | tail -n 60 ;;
-      *)     echo "$RAW" | tail -n 30 ;;
-    esac
-    ;;
-  apply)
-    if [ "$LEVEL" = "ultra" ]; then
-      echo "$RAW" | grep -E '(created|configured|unchanged|deleted)$' | head -n 15
-    else
-      echo "$RAW" | head -n 30
-    fi
-    ;;
-  *)
-    echo "$RAW" | head -n 30
-    ;;
-esac
+```awk
+status:                        # any level
+build|check, ultra:            # subcommand alternation, specific level
+*, ultra:                      # any subcommand, ultra only
+*:                             # catch-all (put last)
 ```
 
-### Example: terraform-compact/filter.sh
+First match wins. Order matters: put specific rules before catch-alls.
 
-```sh
-#!/bin/sh
-# terraform-compact — compact terraform output for LLM contexts
+## Ops (built-in, run in-process)
 
-RAW=$(cat)
-LEVEL="${LOWFAT_LEVEL:-full}"
-SUB="${LOWFAT_SUBCOMMAND}"
+| Op | Form | What it does |
+|---|---|---|
+| `keep` | `keep /regex/` | Keep lines matching the regex |
+| `drop` | `drop /regex/` | Drop lines matching the regex |
+| `head` | `head N` or `head auto` | First N lines (`auto` = level-scaled: 15/30/60 for ultra/full/lite) |
+| `tail` | `tail N` or `tail auto` | Last N lines |
+| `else` | `else "text"` | If state is empty, emit literal `text` |
+| `else-shell:` | `else-shell: <cmd>` | If state is empty, run `<cmd>` with the **original** raw input |
+| `split` | `split /regex/` + `pre:` / `post:` blocks | Split input at first matching line, run separate chains on each half |
 
-case "$SUB" in
-  plan)
-    if [ "$LEVEL" = "ultra" ]; then
-      # Plan summary only
-      SUMMARY=$(echo "$RAW" | grep -E '^Plan:|^No changes|^Error')
-      echo "${SUMMARY:-terraform plan: ok}"
-    else
-      # Strip unchanged resources, keep creates/updates/destroys
-      LIMIT=$( [ "$LEVEL" = "lite" ] && echo 80 || echo 40 )
-      echo "$RAW" | grep -vE '^ +# .* will be read|no changes' | head -n "$LIMIT"
-    fi
-    ;;
-  apply)
-    if [ "$LEVEL" = "ultra" ]; then
-      echo "$RAW" | grep -E '^(Apply complete!|Error:|module\.)' | head -n 10
-    else
-      LIMIT=$( [ "$LEVEL" = "lite" ] && echo 60 || echo 30 )
-      echo "$RAW" | grep -vE '^\s*$|^  #' | head -n "$LIMIT"
-    fi
-    ;;
-  init)
-    if [ "$LEVEL" = "ultra" ]; then
-      echo "$RAW" | grep -E '(successfully initialized|Upgrading|Error)' | head -n 5
-    else
-      echo "$RAW" | head -n 20
-    fi
-    ;;
-  *)
-    echo "$RAW" | head -n 30
-    ;;
-esac
+Regex uses `/.../` delimiters (escape `/` as `\/`). Built-in ops are pure Rust — no subprocess overhead.
+
+## Escape hatches (subprocess)
+
+| Op | Form | Notes |
+|---|---|---|
+| `shell:` | `shell: <inline>` or `shell: \|` + indented block | Runs under `sh -c`. Env: `$level`, `$sub`, `$args`, `$exit` |
+| `python:` | `python: \|` + indented block | `python3 -c` for plain bodies; `uv run --script` for bodies with a `# /// script` PEP 723 header |
+
+## Macros: `define`
+
+Reusable op sequences with positional arguments:
+
+```awk
+define strip-trailers:
+    drop /^[[:space:]]*(Signed-off-by|Co-authored-by):/
+
+define compact-diff(limit):
+    shell: |
+        awk -v lim=$1 -v lvl=$level '
+          BEGIN { in_hunk=0; n=0 }
+          n>=lim { exit }
+          /^diff / { in_hunk=0; print; n++; next }
+          /^@@ /  { in_hunk=1; print; n++; next }
+          in_hunk && /^[+-]/ { print; n++ }
+        '
 ```
 
-### Example: pytest-compact/filter.sh
+`$1`, `$2`, … are substituted at execution time. `$level`, `$sub`, `$args`, `$exit` are left for the shell to expand from env vars.
 
-```sh
-#!/bin/sh
-# pytest-compact — compact pytest output for LLM contexts
+Invocation:
 
-RAW=$(cat)
-LEVEL="${LOWFAT_LEVEL:-full}"
-
-case "$LEVEL" in
-  ultra)
-    # Summary line + FAILED test names only
-    echo "$RAW" | grep -E '^(FAILED|ERROR|=+ .+ =+$)' | head -n 15
-    ;;
-  lite)
-    # Strip per-test progress dots, keep everything else
-    echo "$RAW" | grep -vE '^\s*\.\.\.' | head -n 60
-    ;;
-  *)
-    echo "$RAW" | grep -vE '^\s*\.\.\.' | head -n 30
-    ;;
-esac
+```awk
+diff, ultra:    compact-diff 30
+diff, lite:     compact-diff 400
+diff:           compact-diff 200
+strip-trailers              # zero-arg call
 ```
 
-## Step 3: Add sample data
+## Inline ops on a rule header
 
-Capture real output for benchmarking:
+```awk
+diff, ultra:    compact-diff 30     else-shell: awk 'NF' | head -50
+```
+
+`shell:` / `python:` / `else-shell:` greedily consume the rest of the line.
+
+## Worked example: `git-compact.lf`
+
+```awk
+#!/usr/bin/env lowfat-filter
+
+define strip-trailers:
+    drop /^[[:space:]]*(Signed-off-by|Co-authored-by|Change-Id|Reviewed-by|Acked-by|Tested-by|Reported-by|Cc):/
+
+define abbrev-hash:
+    shell: sed -E 's/^commit ([0-9a-f]{12})[0-9a-f]{28}/commit \1/'
+
+define compact-diff(limit):
+    shell: |
+        awk -v lim=$1 -v lvl=$level '
+          BEGIN { in_hunk=0; n=0 }
+          n>=lim { exit }
+          /^diff / { in_hunk=0; print; n++; next }
+          /^@@ /  { in_hunk=1
+                    if (lvl=="ultra" && match($0,/ @@/))
+                        print substr($0,1,RSTART+2)
+                    else print
+                    n++; next }
+          lvl=="ultra" { next }
+          in_hunk && /^[+-]/ { print; n++ }
+        '
+
+status:
+    keep /^\s*[MADRCU?!] /
+    head 30
+    else "git status: clean"
+
+diff, ultra:    compact-diff 30     else-shell: awk 'NF' | head -50
+diff, lite:     compact-diff 400    else-shell: awk 'NF' | head -50
+diff:           compact-diff 200    else-shell: awk 'NF' | head -50
+
+log, ultra:
+    keep /^(commit |    )/
+    strip-trailers
+    abbrev-hash
+    head 10
+
+log:
+    strip-trailers
+    abbrev-hash
+    head 25
+
+show:
+    split /^diff /
+    pre:
+        keep /^(commit |Merge:|Author:|Date:|    )/
+        strip-trailers
+        abbrev-hash
+    post:
+        compact-diff 100
+    head 100
+
+*:
+    head 30
+```
+
+54 lines, down from 134 in the original shell version. The shell escape hatches handle the genuinely stateful work (diff hunk machine, sed rewrite); everything else is declarative.
+
+## Worked example: `kubectl-compact.lf` (Python + uv)
+
+`kubectl get -o yaml` dumps server-side fields (`managedFields`, `resourceVersion`, `generation`, `creationTimestamp`) that drown the manifest. Real YAML parsing beats regex — annotations can contain anything including embedded `---`.
+
+```awk
+#!/usr/bin/env lowfat-filter
+
+define clean-yaml:
+    python: |
+        # /// script
+        # requires-python = ">=3.10"
+        # dependencies = ["pyyaml>=6"]
+        # ///
+        import sys, yaml
+
+        DROP = {"managedFields", "resourceVersion", "generation",
+                "creationTimestamp", "uid", "selfLink",
+                "ownerReferences"}
+
+        def prune(node):
+            if isinstance(node, dict):
+                if "annotations" in node:
+                    node["annotations"] = f"<{len(node['annotations'])} entries>"
+                return {k: prune(v) for k, v in node.items() if k not in DROP}
+            if isinstance(node, list):
+                return [prune(x) for x in node]
+            return node
+
+        raw = sys.stdin.read()
+        try:
+            docs = list(yaml.safe_load_all(raw))
+        except yaml.YAMLError:
+            sys.stdout.write(raw)            # passthrough non-YAML
+            sys.exit(0)
+
+        for d in docs:
+            if d is None: continue
+            yaml.safe_dump(prune(d), sys.stdout, default_flow_style=False, sort_keys=False)
+            print("---")
+
+get:
+    clean-yaml
+    head 200
+
+logs, ultra:
+    keep /ERROR|FATAL|panic|Exception/
+    tail 30
+    else "no errors in window"
+
+logs:
+    drop /^\s*$/
+    tail 60
+
+events, ultra:
+    keep /Warning|Error/
+    tail 20
+
+events:
+    tail 40
+
+*:
+    head 30
+```
+
+Declare uv as a dep in `lowfat.toml`:
+
+```toml
+[runtime]
+entry = "filter.lf"
+
+[runtime.requires]
+python = ">=3.10"
+uv = "*"
+```
+
+`lowfat plugin doctor` detects the `# /// script` header and prewarms the uv env (~2 s first time, then cached). Subsequent runs hit a warm cache (~200 ms overhead). Use Python for heavy commands (`kubectl describe`, `terraform plan`); stay with shell/awk for hot-path commands (`git status`).
+
+## Filter contract
+
+| Level | What to emit |
+|---|---|
+| `ultra` | Verdict line(s) only — what the AI needs to decide next |
+| `full`  | Strip progress chatter / banner prose; keep diffs / errors / structure |
+| `lite`  | Gentle trim, higher row caps |
+| `$exit != 0` | Be conservative — preserve error blocks |
+
+`$sub` is the first arg of the original command (`get`, `describe`, …). Walk `$args` when the subcommand alone isn't enough (resource type, output flags). Empty output = passthrough (lowfat falls back to the original).
+
+---
+
+# Testing
+
+## Standalone with `lowfat filter`
+
+```sh
+# Run a sample through the filter
+cat samples/git-diff-full.txt | lowfat filter ./filter.lf --sub=diff --level=ultra
+
+# Inspect per-stage cost (line/byte/token counts to stderr; output still to stdout)
+cat samples/git-diff-full.txt | lowfat filter --explain ./filter.lf --sub=diff --level=ultra
+
+# Side-by-side comparison
+diff -u \
+  <(lowfat filter ./filter.lf --sub=diff --level=full < raw.diff) \
+  <(LOWFAT_LEVEL=full LOWFAT_SUBCOMMAND=diff sh ./filter.sh < raw.diff)
+```
+
+## Benchmark against captured samples
 
 ```sh
 # Naming convention: <command>-<subcommand>-<level>.txt
-kubectl get pods -A > ~/.lowfat/plugins/kubectl/kubectl-compact/samples/kubectl-get-full.txt
-kubectl describe pod mypod > ~/.lowfat/plugins/kubectl/kubectl-compact/samples/kubectl-describe-full.txt
-```
+kubectl get pods -A > samples/kubectl-get-full.txt
+kubectl describe pod mypod > samples/kubectl-describe-full.txt
 
-## Step 4: Benchmark
-
-```sh
 lowfat plugin bench kubectl-compact
 ```
 
-Output:
+Aim for **80%+ savings** at `full` on noisy commands, while keeping all actionable information.
 
-```
-Benchmark: kubectl-compact
-
-  kubectl-get-full (full)         892 →     45 tokens  (-95%)
-  kubectl-describe-full (full)    3401 →    122 tokens  (-96%)
-
-  TOTAL                           4293 →    167 tokens  (-96%)
-```
-
-Aim for **80%+ savings** at `full` level while keeping all actionable information.
-
-## Step 5: Test it
+## Plugin health
 
 ```sh
-lowfat kubectl get pods
-lowfat kubectl describe pod mypod
-LOWFAT_LEVEL=ultra lowfat kubectl get pods -A
+lowfat plugin doctor
+# checks: manifest parses, .lf parses, uv installed if needed,
+#         pre-resolves PEP 723 envs so first real run is fast
 ```
 
-## Plugin design rules
+---
 
-1. **Errors are sacred.** Never filter out error messages. If exit code is non-zero, be conservative.
-2. **ultra = what the AI needs to decide next.** Summary line, error count, pass/fail — nothing more.
-3. **full = what a human would skim.** Strip noise (progress bars, download lines, repeated ok), keep structure.
-4. **lite = gentle trim.** Just cut length, keep context.
-5. **Default case matters.** Always handle unknown subcommands with a reasonable `head -n 30`.
-6. **Empty output = passthrough.** If your filter outputs nothing, lowfat uses the original output.
+# Legacy: writing a `filter.sh` (shell)
 
-## The pattern
+Still supported. The script reads stdin, writes stdout, and gets these env vars:
 
-Every plugin follows the same shape:
+| Env var | Value | Example (`lowfat kubectl get pods -n kube-system`) |
+|---------|-------|----|
+| `$LOWFAT_COMMAND`     | top-level command | `kubectl` |
+| `$LOWFAT_SUBCOMMAND`  | first argument | `get` |
+| `$LOWFAT_ARGS`        | all arguments joined | `get pods -n kube-system` |
+| `$LOWFAT_LEVEL`       | `lite` / `full` / `ultra` | `full` |
+| `$LOWFAT_EXIT_CODE`   | command's exit code | `0` |
+
+The recurring shape:
 
 ```sh
 #!/bin/sh
@@ -266,7 +337,6 @@ case "$SUB" in
       # Extract summary/errors only
     else
       LIMIT=$( [ "$LEVEL" = "lite" ] && echo 60 || echo 30 )
-      # Strip noise, keep signal
       echo "$RAW" | grep -vE '<noise patterns>' | head -n "$LIMIT"
     fi
     ;;
@@ -276,7 +346,13 @@ case "$SUB" in
 esac
 ```
 
-## Advanced: Pipeline integration
+That `case`/`level`/`limit` boilerplate is exactly what the `.lf` DSL exists to absorb — most shell plugins are 70% boilerplate around a few `grep`/`head` lines. Pick `.lf` for new plugins; keep existing `.sh` ones unless you have a reason to rewrite.
+
+---
+
+# Advanced
+
+## Pipeline integration
 
 Mix your plugin with built-in processors in `.lowfat`:
 
@@ -285,7 +361,7 @@ pipeline.kubectl = strip-ansi | kubectl-compact | truncate:100
 pipeline.kubectl.error = strip-ansi | head
 ```
 
-## Advanced: Manifest options
+## Manifest options
 
 ```toml
 [plugin]
@@ -297,12 +373,55 @@ commands = ["kubectl"]
 subcommands = ["get", "describe", "logs", "apply"]
 
 [runtime]
-entry = "filter.sh"       # default entry point
+entry = "filter.lf"       # or "filter.sh"
+
+[runtime.requires]        # checked by `lowfat plugin doctor`
+python = ">=3.10"
+uv = "*"
 
 [hooks]
 on_install = "chmod +x filter.sh"
 
 [pipeline]
 pre = ["strip-ansi"]      # run before your filter
-post = ["truncate"]        # run after your filter
+post = ["truncate"]       # run after your filter
 ```
+
+---
+
+# Building a plugin with an AI agent
+
+Copy-paste this into Claude Code (or another tool-using agent) and replace `<COMMAND>`:
+
+```
+Create a lowfat plugin to filter `<COMMAND>` output for LLM contexts.
+
+Before writing code:
+1. Read docs/PLUGINS.md to learn the .lf DSL: ops (keep/drop/head/tail/
+   else, shell:, python:), selectors (sub, level), define macros, split.
+2. Ask me: which subcommands to specialize, and what's noise vs. signal
+   in this command's output.
+
+Scaffold at `~/.lowfat/plugins/<COMMAND>/<COMMAND>-compact/`:
+- `lowfat.toml` — manifest with `commands` (any aliases too), the agreed
+  `subcommands` list, and `runtime.entry = "filter.lf"`
+- `filter.lf` — rules, top-down first-match; reach for `shell:` / `python:`
+  only when keep/drop/head can't express it
+
+Filter contract:
+- level=ultra → verdict line(s) only
+- level=full  → strip noise (progress chatter, banner prose), keep diffs /
+                errors / structure
+- level=lite  → gentle trim, higher row caps
+- Non-zero $exit → be conservative; preserve error blocks
+- Use $sub, fall back to walking $args when you need flags or resource type
+
+Verify:
+- `lowfat plugin doctor`            (parses cleanly; prewarms uv envs)
+- Drop real captures in `samples/<command>-<sub>-full.txt`
+- `cat samples/foo.txt | lowfat filter --explain filter.lf --sub=... --level=...`
+- `lowfat plugin bench <name>`      (aim ≥80% at full on noisy commands)
+- Smoke-test: `lowfat <COMMAND> ...` against a real run
+```
+
+The agent will ask you what counts as noise — answer with sample output if you have it, then iterate on the bench numbers.

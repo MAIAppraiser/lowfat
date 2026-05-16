@@ -5,9 +5,16 @@ use lowfat_plugin::plugin::{FilterInput, FilterPlugin, PluginInfo};
 use lowfat_plugin::security;
 use std::collections::HashMap;
 
+use crate::lf_filter::LfFilter;
 use crate::process::ProcessFilter;
 
-/// Loads a discovered plugin into a runnable ProcessFilter.
+/// Loads a discovered plugin into a runnable [`FilterPlugin`]. Dispatches
+/// on the entry's file extension: `.lf` → in-process [`LfFilter`], any
+/// other extension → external [`ProcessFilter`] via `sh`.
+///
+/// When both `filter.lf` and `filter.sh` exist in the plugin dir, the
+/// manifest's `runtime.entry` decides — defaulting to `filter.sh` for
+/// backward compatibility. New plugins should set `entry = "filter.lf"`.
 pub struct HybridRunner;
 
 impl HybridRunner {
@@ -35,12 +42,21 @@ impl HybridRunner {
             anyhow::bail!("security check failed for '{}': {e}", manifest.plugin.name);
         }
 
-        let filter = ProcessFilter {
-            info,
-            entry: entry_path,
-            base_dir: plugin.base_dir.clone(),
-        };
-        Ok(Box::new(filter))
+        let is_lf = entry_path
+            .extension()
+            .map(|e| e == "lf")
+            .unwrap_or(false);
+        if is_lf {
+            let filter = LfFilter::load(info, entry_path)?;
+            Ok(Box::new(filter))
+        } else {
+            let filter = ProcessFilter {
+                info,
+                entry: entry_path,
+                base_dir: plugin.base_dir.clone(),
+            };
+            Ok(Box::new(filter))
+        }
     }
 }
 

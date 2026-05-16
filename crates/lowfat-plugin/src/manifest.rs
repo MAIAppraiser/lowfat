@@ -28,6 +28,10 @@ pub struct RuntimeConfig {
     /// Entrypoint relative to plugin dir (default: "filter.sh")
     #[serde(default = "default_entry")]
     pub entry: String,
+    /// Optional declared runtimes the plugin needs (python, uv, …).
+    /// Used by `lowfat plugin doctor` to verify availability.
+    #[serde(default)]
+    pub requires: std::collections::BTreeMap<String, String>,
 }
 
 fn default_entry() -> String {
@@ -36,7 +40,10 @@ fn default_entry() -> String {
 
 impl Default for RuntimeConfig {
     fn default() -> Self {
-        Self { entry: default_entry() }
+        Self {
+            entry: default_entry(),
+            requires: Default::default(),
+        }
     }
 }
 

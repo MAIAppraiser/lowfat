@@ -2,3 +2,6 @@
 name = "go-compact"
 commands = ["go"]
 subcommands = ["build", "test", "vet", "mod"]
+
+[runtime]
+entry = "filter.lf"

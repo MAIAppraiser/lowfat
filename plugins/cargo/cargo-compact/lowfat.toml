@@ -2,3 +2,6 @@
 name = "cargo-compact"
 commands = ["cargo"]
 subcommands = ["build", "test", "check", "clippy", "run", "add", "update"]
+
+[runtime]
+entry = "filter.lf"

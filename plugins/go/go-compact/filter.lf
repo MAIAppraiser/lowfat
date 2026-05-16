@@ -1,0 +1,51 @@
+#!/usr/bin/env lowfat-filter
+# go-compact — compact go output for LLM contexts
+
+# ── build ─────────────────────────────────────────────────────────
+build, ultra:
+    keep /: .*(error|undefined|cannot)/
+    head 10
+    else "go build: ok"
+
+build, lite:
+    drop /^# /
+    head 60
+
+build:
+    drop /^# /
+    head 30
+
+# ── test ──────────────────────────────────────────────────────────
+test, ultra:
+    keep /^(ok |FAIL|---)/
+    head 15
+
+test, lite:
+    drop /^\s*$|^=== (RUN|PAUSE|CONT)/
+    head 60
+
+test:
+    drop /^\s*$|^=== (RUN|PAUSE|CONT)/
+    head 30
+
+# ── vet ───────────────────────────────────────────────────────────
+vet, ultra:
+    keep /: /
+    head 10
+    else "go vet: ok"
+
+vet:
+    head 30
+
+# ── mod ───────────────────────────────────────────────────────────
+mod, ultra:
+    keep /^go:|added|upgraded|removed/
+    head 10
+    else "go mod: ok"
+
+mod:
+    head 30
+
+# ── default ───────────────────────────────────────────────────────
+*:
+    head 30
