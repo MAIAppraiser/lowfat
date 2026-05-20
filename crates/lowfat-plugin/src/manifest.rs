@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::path::Path;
 
 /// Parsed `lowfat.toml` (or `init.toml`) plugin manifest.
 #[derive(Debug, Deserialize)]
@@ -23,26 +24,33 @@ pub struct PluginMeta {
     pub subcommands: Option<Vec<String>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct RuntimeConfig {
-    /// Entrypoint relative to plugin dir (default: "filter.sh")
-    #[serde(default = "default_entry")]
-    pub entry: String,
+    /// Entrypoint relative to plugin dir. Omit it — see [`resolve_entry`].
+    ///
+    /// [`resolve_entry`]: RuntimeConfig::resolve_entry
+    #[serde(default)]
+    pub entry: Option<String>,
     /// Optional declared runtimes the plugin needs (python, uv, …).
     /// Used by `lowfat plugin doctor` to verify availability.
     #[serde(default)]
     pub requires: std::collections::BTreeMap<String, String>,
 }
 
-fn default_entry() -> String {
-    "filter.sh".to_string()
-}
-
-impl Default for RuntimeConfig {
-    fn default() -> Self {
-        Self {
-            entry: default_entry(),
-            requires: Default::default(),
+impl RuntimeConfig {
+    /// Resolve the entrypoint filename for a plugin rooted at `base_dir`.
+    ///
+    /// An explicit `entry` always wins. Otherwise auto-detect: prefer
+    /// `filter.lf` (the format for new plugins), falling back to `filter.sh`
+    /// so pre-`.lf` shell plugins keep loading without a manifest change.
+    pub fn resolve_entry(&self, base_dir: &Path) -> String {
+        if let Some(entry) = &self.entry {
+            return entry.clone();
+        }
+        if base_dir.join("filter.lf").is_file() {
+            "filter.lf".to_string()
+        } else {
+            "filter.sh".to_string()
         }
     }
 }
@@ -83,7 +91,7 @@ entry = "filter.sh"
         let manifest = PluginManifest::parse(toml).unwrap();
         assert_eq!(manifest.plugin.name, "git-compact");
         assert_eq!(manifest.plugin.commands, vec!["git"]);
-        assert_eq!(manifest.runtime.entry, "filter.sh");
+        assert_eq!(manifest.runtime.entry.as_deref(), Some("filter.sh"));
     }
 
     #[test]
@@ -95,7 +103,33 @@ commands = ["git"]
 "#;
         let manifest = PluginManifest::parse(toml).unwrap();
         assert_eq!(manifest.plugin.name, "git-compact");
-        assert_eq!(manifest.runtime.entry, "filter.sh");
+        // No [runtime] → entry stays unset, resolved lazily at load time.
+        assert!(manifest.runtime.entry.is_none());
+    }
+
+    #[test]
+    fn resolve_entry_auto_detects() {
+        let dir = std::env::temp_dir()
+            .join(format!("lowfat-resolve-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let rt = RuntimeConfig::default();
+        // No filter.lf present → fall back to filter.sh.
+        assert_eq!(rt.resolve_entry(&dir), "filter.sh");
+
+        // filter.lf present → auto-detected.
+        std::fs::write(dir.join("filter.lf"), "*:\n    head 30\n").unwrap();
+        assert_eq!(rt.resolve_entry(&dir), "filter.lf");
+
+        // Explicit entry always wins over auto-detection.
+        let rt_explicit = RuntimeConfig {
+            entry: Some("custom.sh".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(rt_explicit.resolve_entry(&dir), "custom.sh");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -11,7 +11,7 @@ A plugin lives at `~/.lowfat/plugins/<category>/<name>/` and ships in one of two
 | Format | When to use |
 |---|---|
 | **`filter.lf`** | Default for new plugins. Declarative rules parsed in-process; shell + python escape hatches for the rare cases that can't be expressed in built-in ops. |
-| **`filter.sh`** | Legacy. POSIX shell script reading stdin → writing stdout. Still supported; the manifest's `runtime.entry` decides which one runs. |
+| **`filter.sh`** | Legacy. POSIX shell script reading stdin → writing stdout. Still supported — when both files exist `filter.lf` is auto-detected; set `runtime.entry` to force `filter.sh`. |
 
 ## Quick start
 
@@ -35,14 +35,11 @@ Edit the manifest:
 name = "kubectl-compact"
 commands = ["kubectl"]
 subcommands = ["get", "describe", "logs", "apply"]
-
-[runtime]
-entry = "filter.lf"
 ```
 
 - `commands` — top-level command(s) intercepted (e.g., `kubectl`)
 - `subcommands` — which subcommands this plugin handles (omit to handle all)
-- `runtime.entry` — `filter.lf` or `filter.sh`
+- the entrypoint is auto-detected (`filter.lf`, else `filter.sh`) — add a `[runtime]` table only to override it or declare `requires`
 
 ---
 
@@ -251,9 +248,6 @@ events:
 Declare uv as a dep in `lowfat.toml`:
 
 ```toml
-[runtime]
-entry = "filter.lf"
-
 [runtime.requires]
 python = ">=3.10"
 uv = "*"
@@ -375,7 +369,7 @@ commands = ["kubectl"]
 subcommands = ["get", "describe", "logs", "apply"]
 
 [runtime]
-entry = "filter.lf"       # or "filter.sh"
+entry = "filter.lf"       # optional — auto-detected (filter.lf, else filter.sh)
 
 [runtime.requires]        # checked by `lowfat plugin doctor`
 python = ">=3.10"
@@ -405,8 +399,8 @@ Before writing code:
    in this command's output.
 
 Scaffold at `~/.lowfat/plugins/<COMMAND>/<COMMAND>-compact/`:
-- `lowfat.toml` — manifest with `commands` (any aliases too), the agreed
-  `subcommands` list, and `runtime.entry = "filter.lf"`
+- `lowfat.toml` — manifest with `commands` (any aliases too) and the agreed
+  `subcommands` list (no `[runtime]` needed — `filter.lf` is auto-detected)
 - `filter.lf` — rules, top-down first-match; reach for `shell:` / `python:`
   only when keep/drop/head can't express it
 

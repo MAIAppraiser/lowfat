@@ -26,7 +26,7 @@ pub fn validate_plugin(manifest: &PluginManifest, base_dir: &Path) -> Result<(),
 
 /// Check that entry path doesn't escape the plugin directory.
 fn validate_entry_path(manifest: &PluginManifest, base_dir: &Path) -> Result<(), SecurityError> {
-    let entry = &manifest.runtime.entry;
+    let entry = manifest.runtime.resolve_entry(base_dir);
 
     if entry.starts_with('/') || entry.starts_with('\\') {
         return Err(SecurityError::PathTraversal(entry.clone()));
@@ -35,7 +35,7 @@ fn validate_entry_path(manifest: &PluginManifest, base_dir: &Path) -> Result<(),
         return Err(SecurityError::PathTraversal(entry.clone()));
     }
 
-    let resolved = base_dir.join(entry);
+    let resolved = base_dir.join(&entry);
     let canonical_base = base_dir
         .canonicalize()
         .unwrap_or_else(|_| base_dir.to_path_buf());

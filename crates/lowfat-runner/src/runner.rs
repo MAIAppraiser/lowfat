@@ -12,15 +12,18 @@ use crate::process::ProcessFilter;
 /// on the entry's file extension: `.lf` → in-process [`LfFilter`], any
 /// other extension → external [`ProcessFilter`] via `sh`.
 ///
-/// When both `filter.lf` and `filter.sh` exist in the plugin dir, the
-/// manifest's `runtime.entry` decides — defaulting to `filter.sh` for
-/// backward compatibility. New plugins should set `entry = "filter.lf"`.
+/// The entrypoint is resolved by `RuntimeConfig::resolve_entry`: an explicit
+/// `runtime.entry` in the manifest wins; otherwise it is auto-detected —
+/// `filter.lf` when present, else `filter.sh`. A plain `.lf` plugin therefore
+/// needs no `[runtime]` table at all.
 pub struct HybridRunner;
 
 impl HybridRunner {
     pub fn load(plugin: &DiscoveredPlugin) -> Result<Box<dyn FilterPlugin>> {
         let manifest = &plugin.manifest;
-        let entry_path = plugin.base_dir.join(&manifest.runtime.entry);
+        let entry_path = plugin
+            .base_dir
+            .join(manifest.runtime.resolve_entry(&plugin.base_dir));
 
         let info = PluginInfo {
             name: manifest.plugin.name.clone(),

@@ -52,7 +52,9 @@ pub fn doctor() -> Result<()> {
     for plugin in &plugins {
         total += 1;
         let name = &plugin.manifest.plugin.name;
-        let entry_path = plugin.base_dir.join(&plugin.manifest.runtime.entry);
+        let entry_path = plugin
+            .base_dir
+            .join(plugin.manifest.runtime.resolve_entry(&plugin.base_dir));
         if !entry_path.exists() {
             println!("  {name:<24} x entry not found: {}", entry_path.display());
             continue;
@@ -237,7 +239,7 @@ pub fn info(name: &str) -> Result<()> {
             println!("  Description: {}", m.plugin.description.as_deref().unwrap_or("-"));
             println!("  Author:      {}", m.plugin.author.as_deref().unwrap_or("-"));
             println!("  Category:    {}", p.category);
-            println!("  Entry:       {}", m.runtime.entry);
+            println!("  Entry:       {}", m.runtime.resolve_entry(&p.base_dir));
             println!("  Commands:    {}", m.plugin.commands.join(", "));
             println!("  Path:        {}", p.base_dir.display());
         }
@@ -273,23 +275,20 @@ pub fn new_plugin(name: &str, command: &str) -> Result<()> {
     }
     std::fs::create_dir_all(&plugin_dir)?;
 
-    // Write lowfat.toml manifest
+    // Write lowfat.toml manifest. No [runtime] needed — the entrypoint is
+    // auto-detected (filter.lf wins over filter.sh).
     let manifest = format!(
         r#"[plugin]
 name = "{name}"
 commands = ["{command}"]
-
-[runtime]
-type = "shell"
-entry = "filter.sh"
 "#,
         name = name,
         command = command,
     );
     std::fs::write(plugin_dir.join("lowfat.toml"), manifest)?;
 
-    // Write filter script
-    std::fs::write(plugin_dir.join("filter.sh"), scaffold_shell())?;
+    // Write filter rules
+    std::fs::write(plugin_dir.join("filter.lf"), scaffold_lf(name, command))?;
 
     // Scaffold samples/ directory
     let samples_dir = plugin_dir.join("samples");
@@ -304,32 +303,33 @@ entry = "filter.sh"
 
     println!("lowfat: created plugin '{name}'");
     println!("  {}", plugin_dir.display());
-    println!("  edit: {}", plugin_dir.join("filter.sh").display());
+    println!("  edit: {}", plugin_dir.join("filter.lf").display());
     println!("  bench: lowfat plugin bench {name}");
     println!("  test: lowfat {command} <args>");
     Ok(())
 }
 
-fn scaffold_shell() -> String {
-    r#"#!/bin/sh
-# lowfat plugin — reads raw output from stdin, writes filtered output to stdout
-# env: $LOWFAT_LEVEL (lite|full|ultra), $LOWFAT_COMMAND, $LOWFAT_SUBCOMMAND, $LOWFAT_ARGS, $LOWFAT_EXIT_CODE
+/// Scaffold a starter `filter.lf` — a level-scaled head, the safe default.
+fn scaffold_lf(name: &str, command: &str) -> String {
+    format!(
+        r#"#!/usr/bin/env lowfat-filter
+# {name} — compact {command} output for LLM contexts
 #
-# Level convention:
-#   lite  — gentle trim, keep most output (~60 lines)
-#   full  — balanced, strip noise (~30 lines)
-#   ultra — summary only, minimal output (~10 lines)
+# Rules match (subcommand, level) top-down; first match wins.
+# Levels: ultra (~10 lines) · full (~30) · lite (~60).
+# Ops: keep /re/ · drop /re/ · head N · tail N · else "text".
+# Escape hatches: `shell: <cmd>` and `python: |` when ops aren't enough.
 
-LEVEL="${LOWFAT_LEVEL:-full}"
-SUB="$LOWFAT_SUBCOMMAND"
+*, ultra:
+    head 10
 
-case "$LEVEL" in
-  lite)  head -n 60 ;;
-  ultra) head -n 10 ;;
-  *)     head -n 30 ;;
-esac
+*, lite:
+    head 60
+
+*:
+    head 30
 "#
-    .to_string()
+    )
 }
 
 pub fn bench(name: &str) -> Result<()> {
@@ -371,7 +371,9 @@ pub fn bench(name: &str) -> Result<()> {
             commands: plugin.manifest.plugin.commands.clone(),
             subcommands: plugin.manifest.plugin.subcommands.clone().unwrap_or_default(),
         },
-        entry: plugin.base_dir.join(&plugin.manifest.runtime.entry),
+        entry: plugin
+            .base_dir
+            .join(plugin.manifest.runtime.resolve_entry(&plugin.base_dir)),
         base_dir: plugin.base_dir.clone(),
     };
 
