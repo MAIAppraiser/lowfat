@@ -50,13 +50,15 @@ subcommands = ["get", "describe", "logs", "apply"]
 ## Selectors
 
 ```awk
-status:                        # any level
-build|check, ultra:            # subcommand alternation, specific level
-*, ultra:                      # any subcommand, ultra only
+status:                        # one subcommand
+build|check:                   # subcommand alternation
+apply*:                        # `*` glob inside the token
 *:                             # catch-all (put last)
 ```
 
-First match wins. Order matters: put specific rules before catch-alls.
+First match wins. Order matters: put specific rules before catch-alls. To
+branch on level, exit code, or flags, use a [cascade](#cascades--if--elif--else)
+in the rule body — not the selector.
 
 ## Ops (built-in, run in-process)
 
@@ -66,13 +68,38 @@ First match wins. Order matters: put specific rules before catch-alls.
 | `drop`        | `drop /regex/`                            | Drop lines matching the regex                                        |
 | `head`        | `head N` or `head auto`                   | First N lines (`auto` = level-scaled: 15/30/60 for ultra/full/lite)  |
 | `tail`        | `tail N` or `tail auto`                   | Last N lines                                                         |
-| `else`        | `else "text"`                             | If state is empty, emit literal `text`                               |
-| `else-shell:` | `else-shell: <cmd>`                       | If state is empty, run `<cmd>` with the **original** raw input       |
+| `or`          | `or "text"`                               | If state is empty, emit literal `text` (`else` = legacy alias)       |
+| `or-shell:`   | `or-shell: <cmd>`                         | If state is empty, run `<cmd>` with the **original** raw input       |
+| `passthrough` | `passthrough`                             | Emit the stream unchanged — the conservative arm of a cascade        |
 | `split`       | `split /regex/` + `pre:` / `post:` blocks | Split input at first matching line, run separate chains on each half |
 
 Regex uses `/.../` delimiters (escape `/` as `\/`). Built-in ops are pure Rust — no subprocess overhead.
 
 Ops run top-to-bottom as a pipeline — each one receives the previous op's output. Combinations compose by intersection: `keep /error/` then `drop /ignored/` keeps lines matching `error` AND not matching `ignored`. Order matters: `keep /X/` then `drop /X/` produces nothing.
+
+## Cascades — `if` / `elif` / `else`
+
+A rule body is either a **pipeline** (the ops above) or a **cascade**: `if` / `elif` / `else` arms where the first matching guard wins and exactly one arm runs.
+
+```awk
+diff:
+    if exit failed:    passthrough
+    elif level ultra:  compact-diff 30
+    elif --stat:       compact-diff 40
+    else:              compact-diff 200
+```
+
+An arm body is itself a pipeline — inline after the colon, or indented for several ops. A body is a pipeline *or* a cascade, never both.
+
+**Guards** name a closed set of dimensions — no expressions, no comparisons:
+
+| Guard                       | True when                            |
+| --------------------------- | ------------------------------------ |
+| `exit failed` / `exit ok`   | command exit code ≠ 0 / = 0          |
+| `level ultra\|full\|lite`   | active level                         |
+| `--stat`, `-p`, …           | that flag is present in `$args`      |
+
+Join guards with `and` — `if level ultra and --stat:`. For "or", write separate arms: first-match-wins is the disjunction. `else` is optional; if no arm matches, the stream passes through unchanged.
 
 ## Escape hatches (subprocess)
 
@@ -114,10 +141,10 @@ strip-trailers              # zero-arg call
 ## Inline ops on a rule header
 
 ```awk
-diff, ultra:    compact-diff 30     else-shell: awk 'NF' | head -50
+diff:    compact-diff 30     or-shell: awk 'NF' | head -50
 ```
 
-`shell:` / `python:` / `else-shell:` greedily consume the rest of the line.
+`shell:` / `python:` / `or-shell:` greedily consume the rest of the line.
 
 ## Worked example: `git-compact.lf`
 
@@ -146,40 +173,55 @@ define compact-diff(limit):
         '
 
 status:
-    keep /^\s*[MADRCU?!] /
+    keep /^\t/                      # long-format file entries are tab-indented
     head 30
-    else "git status: clean"
+    or "git status: clean"
 
-diff, ultra:    compact-diff 30     else-shell: awk 'NF' | head -50
-diff, lite:     compact-diff 400    else-shell: awk 'NF' | head -50
-diff:           compact-diff 200    else-shell: awk 'NF' | head -50
-
-log, ultra:
-    keep /^(commit |    )/
-    strip-trailers
-    abbrev-hash
-    head 10
+diff:
+    if exit failed:
+        passthrough
+    elif level ultra:
+        compact-diff 30
+        or-shell: awk 'NF' | head -50
+    elif level lite:
+        compact-diff 400
+        or-shell: awk 'NF' | head -50
+    else:
+        compact-diff 200
+        or-shell: awk 'NF' | head -50
 
 log:
-    strip-trailers
-    abbrev-hash
-    head 25
-
-show:
-    split /^diff /
-    pre:
-        keep /^(commit |Merge:|Author:|Date:|    )/
+    if level ultra:
+        keep /^(commit |    )/
         strip-trailers
         abbrev-hash
-    post:
-        compact-diff 100
-    head 100
+        head 10
+    else:
+        strip-trailers
+        abbrev-hash
+        head 25
+
+show:
+    if level ultra:
+        keep /^(commit |Author:|Date:|    |diff --git)/
+        strip-trailers
+        abbrev-hash
+        head 20
+    else:
+        split /^diff /
+        pre:
+            keep /^(commit |Merge:|Author:|Date:|    )/
+            strip-trailers
+            abbrev-hash
+        post:
+            compact-diff 100
+        head 100
 
 *:
     head 30
 ```
 
-54 lines, down from 134 in the original shell version. The shell escape hatches handle the genuinely stateful work (diff hunk machine, sed rewrite); everything else is declarative.
+The cascades branch on exit code and level declaratively; the shell escape hatches handle the genuinely stateful work (diff hunk machine, sed rewrite). A `git diff` that exits non-zero passes straight through — conservative by default, no `shell:` block needed.
 
 ## Worked example: `kubectl-compact.lf` (Python + uv)
 
@@ -225,21 +267,21 @@ get:
     clean-yaml
     head 200
 
-logs, ultra:
-    keep /ERROR|FATAL|panic|Exception/
-    tail 30
-    else "no errors in window"
-
 logs:
-    drop /^\s*$/
-    tail 60
-
-events, ultra:
-    keep /Warning|Error/
-    tail 20
+    if level ultra:
+        keep /ERROR|FATAL|panic|Exception/
+        tail 30
+        or "no errors in window"
+    else:
+        drop /^\s*$/
+        tail 60
 
 events:
-    tail 40
+    if level ultra:
+        keep /Warning|Error/
+        tail 20
+    else:
+        tail 40
 
 *:
     head 30
@@ -278,6 +320,9 @@ cat samples/git-diff-full.txt | lowfat filter ./filter.lf --sub=diff --level=ult
 
 # Inspect per-stage cost (line/byte/token counts to stderr; output still to stdout)
 cat samples/git-diff-full.txt | lowfat filter --explain ./filter.lf --sub=diff --level=ultra
+
+# Exercise an `if exit failed:` arm — --exit sets $exit / the exit guard
+cat samples/git-diff-fail.txt | lowfat filter ./filter.lf --sub=diff --exit=1
 
 # Side-by-side comparison
 diff -u \
@@ -392,7 +437,8 @@ Create a lowfat plugin to filter `<COMMAND>` output for LLM contexts.
 
 Before writing code:
 1. Read docs/PLUGINS.md to learn lf-filter, lowfat's plugin DSL: ops
-   (keep/drop/head/tail/else, shell:, python:), selectors (sub, level),
+   (keep/drop/head/tail/or/passthrough, shell:, python:), subcommand
+   selectors, if/elif/else cascades with exit/level/flag guards,
    define macros, split.
 2. Ask me: which subcommands to specialize, and what's noise vs. signal
    in this command's output.
@@ -408,7 +454,7 @@ Filter contract:
 - level=full  → strip noise (progress chatter, banner prose), keep diffs /
                 errors / structure
 - level=lite  → gentle trim, higher row caps
-- Non-zero $exit → be conservative; preserve error blocks
+- Non-zero $exit → be conservative; `if exit failed: passthrough`
 - Use $sub, fall back to walking $args when you need flags or resource type
 
 Verify:

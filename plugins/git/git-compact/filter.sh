@@ -58,7 +58,8 @@ abbreviate_commit_hash() {
 
 case "$SUB" in
   status)
-    result=$(echo "$RAW" | grep -E '^\s*[MADRCU?!] ' | head -n 30)
+    # Long-format file entries are tab-indented; section headers/hints are not.
+    result=$(echo "$RAW" | grep -E '^	' | head -n 30)
     if [ -z "$result" ]; then
       echo "git status: clean"
     else

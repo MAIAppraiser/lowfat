@@ -91,6 +91,9 @@ Examples:
         /// Whitespace-separated args (sets $args)
         #[arg(long, default_value = "")]
         args: String,
+        /// Exit code of the original command (sets $exit)
+        #[arg(long, default_value_t = 0)]
+        exit: i32,
         /// Print per-stage diagnostics to stderr
         #[arg(long)]
         explain: bool,
@@ -233,8 +236,9 @@ fn main() {
             sub,
             level,
             args,
+            exit,
             explain,
-        }) => commands::filter::run(&path, &sub, &level, &args, explain),
+        }) => commands::filter::run(&path, &sub, &level, &args, exit, explain),
         Some(Commands::Plugin { action }) => match action {
             PluginAction::List => commands::plugin::list(),
             PluginAction::Doctor => commands::plugin::doctor(),

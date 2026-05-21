@@ -17,6 +17,7 @@ pub fn run(
     sub: &str,
     level_str: &str,
     args_str: &str,
+    exit_code: i32,
     explain: bool,
 ) -> Result<()> {
     let source = std::fs::read_to_string(path)
@@ -39,7 +40,7 @@ pub fn run(
     let ctx = ExecCtx {
         sub,
         level,
-        exit_code: 0,
+        exit_code,
         args: &args,
     };
 

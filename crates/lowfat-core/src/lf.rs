@@ -53,10 +53,11 @@ pub enum Op {
     Drop(PatternRegex),
     Head(HeadArg),
     Tail(HeadArg),
-    Else(String),
-    ElseShell(String),
+    Or(String),
+    OrShell(String),
     Shell(String),
     Python(String),
+    Passthrough,
     MacroCall {
         name: String,
         args: Vec<MacroArg>,
@@ -66,6 +67,35 @@ pub enum Op {
         pre: Vec<Op>,
         post: Vec<Op>,
     },
+    /// `if` / `elif` / `else` cascade — first matching branch runs.
+    Cascade(Vec<Branch>),
+}
+
+/// One arm of an [`Op::Cascade`]. `guard: None` is the `else` arm.
+#[derive(Debug, Clone)]
+pub struct Branch {
+    pub guard: Option<Guard>,
+    pub ops: Vec<Op>,
+}
+
+/// A guard is an AND of atoms — `if level ultra and --stat:`.
+#[derive(Debug, Clone)]
+pub struct Guard {
+    pub atoms: Vec<Atom>,
+}
+
+/// One closed-vocabulary condition inside a [`Guard`].
+#[derive(Debug, Clone)]
+pub enum Atom {
+    Exit(ExitMatch),
+    Level(Level),
+    Flag(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitMatch {
+    Ok,
+    Failed,
 }
 
 #[derive(Debug, Clone)]
@@ -105,7 +135,7 @@ impl Rule {
     pub fn matches(&self, sub: &str, level: Level) -> bool {
         let sub_ok = match &self.sub {
             SubPattern::Star => true,
-            SubPattern::Alt(alts) => alts.iter().any(|a| a == sub),
+            SubPattern::Alt(alts) => alts.iter().any(|a| glob_match(a, sub)),
         };
         let lvl_ok = match &self.level {
             LevelPattern::Star => true,
@@ -160,11 +190,16 @@ const OP_KEYWORDS: &[&str] = &[
     "drop",
     "head",
     "tail",
+    "or",
+    "or-shell:",
     "else",
     "else-shell:",
     "shell:",
     "python:",
     "split",
+    "passthrough",
+    "if",
+    "elif",
 ];
 
 pub fn parse(input: &str) -> Result<RuleSet> {
@@ -294,11 +329,13 @@ impl<'a> Parser<'a> {
         let mut ops = Vec::new();
         let inline = after.trim();
         if !inline.is_empty() {
-            let inline_ops = self.parse_inline_ops(inline, line_no)?;
-            ops.extend(inline_ops);
+            // Inline ops after `:` are always a pipeline (v1 form).
+            ops.extend(self.parse_inline_ops(inline, line_no)?);
+            ops.extend(self.parse_indented_ops(parent_indent)?);
+        } else {
+            // An indented body may be a pipeline or an if/elif/else cascade.
+            ops = self.parse_body(parent_indent)?;
         }
-        let indented = self.parse_indented_ops(parent_indent)?;
-        ops.extend(indented);
 
         if ops.is_empty() {
             bail!("line {}: rule has no ops", line_no);
@@ -330,6 +367,95 @@ impl<'a> Parser<'a> {
         Ok(ops)
     }
 
+    /// An indented rule body: a plain pipeline, or an `if`/`elif`/`else`
+    /// cascade when the first significant line opens with `if`.
+    fn parse_body(&mut self, parent_indent: usize) -> Result<Vec<Op>> {
+        if let Some(line) = self.peek_significant() {
+            if line.indent > parent_indent {
+                let (head, _) = split_first_word(&line.text);
+                if head == "if" {
+                    let branches = self.parse_cascade(parent_indent)?;
+                    return Ok(vec![Op::Cascade(branches)]);
+                }
+            }
+        }
+        self.parse_indented_ops(parent_indent)
+    }
+
+    /// Parse `if` / `elif`* / `else`? arms — all share one indent.
+    fn parse_cascade(&mut self, parent_indent: usize) -> Result<Vec<Branch>> {
+        let mut branches: Vec<Branch> = Vec::new();
+        let mut arm_indent: Option<usize> = None;
+        loop {
+            let Some(line) = self.peek_significant() else {
+                break;
+            };
+            if line.indent <= parent_indent {
+                break;
+            }
+            match arm_indent {
+                None => arm_indent = Some(line.indent),
+                Some(ai) if line.indent != ai => break,
+                Some(_) => {}
+            }
+            let line_no = line.line_no;
+            // `else` is glued to its colon (`else:`), so take the leading
+            // alphabetic run rather than the whitespace-delimited word.
+            let kw: String = line
+                .text
+                .chars()
+                .take_while(|c| c.is_ascii_alphabetic())
+                .collect();
+            match kw.as_str() {
+                "if" if branches.is_empty() => {}
+                "elif" | "else" if !branches.is_empty() => {}
+                "if" => bail!("line {}: unexpected `if` — cascade already open", line_no),
+                "elif" | "else" => {
+                    bail!("line {}: `{}` without a leading `if`", line_no, kw)
+                }
+                _ => break,
+            }
+            let branch = self.parse_branch(&kw)?;
+            let is_else = branch.guard.is_none();
+            branches.push(branch);
+            if is_else {
+                break; // `else` is always the last arm
+            }
+        }
+        Ok(branches)
+    }
+
+    /// Parse one cascade arm: `<if|elif|else> <guard>:` then inline or
+    /// indented ops.
+    fn parse_branch(&mut self, head: &str) -> Result<Branch> {
+        let line = self.advance().unwrap();
+        let line_no = line.line_no;
+        let indent = line.indent;
+        let rest = line.text[head.len()..].trim_start();
+        let colon = rest
+            .find(':')
+            .ok_or_else(|| anyhow!("line {}: missing `:` in `{}` arm", line_no, head))?;
+        let guard_str = rest[..colon].trim();
+        let after = rest[colon + 1..].trim();
+        let guard = if head == "else" {
+            if !guard_str.is_empty() {
+                bail!("line {}: `else` takes no guard", line_no);
+            }
+            None
+        } else {
+            Some(parse_guard(guard_str, line_no)?)
+        };
+        let mut ops = Vec::new();
+        if !after.is_empty() {
+            ops.extend(self.parse_inline_ops(after, line_no)?);
+        }
+        ops.extend(self.parse_indented_ops(indent)?);
+        if ops.is_empty() {
+            bail!("line {}: `{}` arm has no ops", line_no, head);
+        }
+        Ok(Branch { guard, ops })
+    }
+
     /// Parse a single op from the current significant line, advancing
     /// past any block bodies and sub-blocks the op consumes.
     fn parse_op_line(&mut self) -> Result<Op> {
@@ -356,17 +482,18 @@ impl<'a> Parser<'a> {
                 let rest = text[head.len()..].trim();
                 Ok(Op::Tail(parse_head_arg(rest, line_no)?))
             }
-            "else" => {
+            "or" | "else" => {
                 let rest = text[head.len()..].trim_start();
-                Ok(Op::Else(parse_string_literal(rest, line_no)?))
+                Ok(Op::Or(parse_string_literal(rest, line_no)?))
             }
-            "else-shell:" => {
+            "or-shell:" | "else-shell:" => {
                 let body = text[head.len()..].trim_start().to_string();
                 if body.is_empty() {
-                    bail!("line {}: `else-shell:` requires a command", line_no);
+                    bail!("line {}: `{}` requires a command", line_no, head);
                 }
-                Ok(Op::ElseShell(body))
+                Ok(Op::OrShell(body))
             }
+            "passthrough" => Ok(Op::Passthrough),
             "shell:" => Ok(Op::Shell(self.parse_block_body(
                 text,
                 head,
@@ -525,13 +652,17 @@ impl<'a> Parser<'a> {
                     ops.push(Op::Python(body));
                     remaining = "";
                 }
-                "else-shell:" => {
+                "or-shell:" | "else-shell:" => {
                     let body = remaining[head.len()..].trim_start().to_string();
                     if body.is_empty() {
-                        bail!("line {}: inline `else-shell:` needs a command", line_no);
+                        bail!("line {}: inline `{}` needs a command", line_no, head);
                     }
-                    ops.push(Op::ElseShell(body));
+                    ops.push(Op::OrShell(body));
                     remaining = "";
+                }
+                "passthrough" => {
+                    ops.push(Op::Passthrough);
+                    remaining = remaining[head.len()..].trim_start();
                 }
                 "keep" | "drop" => {
                     let rest = remaining[head.len()..].trim_start();
@@ -554,10 +685,10 @@ impl<'a> Parser<'a> {
                     });
                     remaining = after.trim_start();
                 }
-                "else" => {
+                "or" | "else" => {
                     let rest = remaining[head.len()..].trim_start();
                     let (s, after) = parse_string_literal_and_rest(rest, line_no)?;
-                    ops.push(Op::Else(s));
+                    ops.push(Op::Or(s));
                     remaining = after.trim_start();
                 }
                 "split" => {
@@ -629,6 +760,76 @@ fn parse_selector(s: &str) -> Result<(SubPattern, LevelPattern)> {
     };
 
     Ok((sub, level))
+}
+
+/// Glob match for subcommand selectors. `*` matches any run of chars
+/// (including empty); no other metacharacters. With no `*` it is an
+/// exact compare, so plain selectors behave exactly as in v1.
+fn glob_match(pat: &str, text: &str) -> bool {
+    match pat.find('*') {
+        None => pat == text,
+        Some(star) => {
+            let prefix = &pat[..star];
+            let rest = &pat[star + 1..];
+            let Some(tail) = text.strip_prefix(prefix) else {
+                return false;
+            };
+            if rest.is_empty() {
+                return true;
+            }
+            (0..=tail.len())
+                .filter(|&i| tail.is_char_boundary(i))
+                .any(|i| glob_match(rest, &tail[i..]))
+        }
+    }
+}
+
+/// Parse a guard — an AND of atoms joined by ` and `.
+fn parse_guard(s: &str, line_no: usize) -> Result<Guard> {
+    let mut atoms = Vec::new();
+    for part in s.split(" and ") {
+        let part = part.trim();
+        if part.is_empty() {
+            bail!("line {}: empty guard", line_no);
+        }
+        atoms.push(parse_atom(part, line_no)?);
+    }
+    if atoms.is_empty() {
+        bail!("line {}: empty guard", line_no);
+    }
+    Ok(Guard { atoms })
+}
+
+/// Parse one guard atom: `exit ok|failed`, `level ultra|full|lite`, or a
+/// `--flag` / `-x`.
+fn parse_atom(s: &str, line_no: usize) -> Result<Atom> {
+    if s.starts_with('-') {
+        return Ok(Atom::Flag(s.to_string()));
+    }
+    let mut words = s.split_whitespace();
+    let dim = words.next().unwrap_or("");
+    let val = words.next();
+    if words.next().is_some() {
+        bail!("line {}: guard `{}` has too many words", line_no, s);
+    }
+    match (dim, val) {
+        ("exit", Some("ok")) => Ok(Atom::Exit(ExitMatch::Ok)),
+        ("exit", Some("failed")) => Ok(Atom::Exit(ExitMatch::Failed)),
+        ("exit", Some(v)) => {
+            bail!("line {}: unknown exit value `{}` (expected ok|failed)", line_no, v)
+        }
+        ("exit", None) => bail!("line {}: `exit` guard needs a value (ok|failed)", line_no),
+        ("level", Some(v)) => {
+            let lvl: Level = v.parse().map_err(|e: String| anyhow!("line {line_no}: {e}"))?;
+            Ok(Atom::Level(lvl))
+        }
+        ("level", None) => bail!("line {}: `level` guard needs a value", line_no),
+        (other, _) => bail!(
+            "line {}: unknown guard `{}` (expected `exit ...`, `level ...`, or a --flag)",
+            line_no,
+            other
+        ),
+    }
 }
 
 fn parse_define_header(s: &str) -> Result<(String, Vec<String>, &str)> {
@@ -938,8 +1139,10 @@ fn describe_op(op: &Op) -> String {
         Op::Drop(p) => format!("drop /{}/", p.source),
         Op::Head(arg) => format!("head {}", describe_head(arg)),
         Op::Tail(arg) => format!("tail {}", describe_head(arg)),
-        Op::Else(s) => format!("else {s:?}"),
-        Op::ElseShell(s) => format!("else-shell: {}", first_line(s)),
+        Op::Or(s) => format!("or {s:?}"),
+        Op::OrShell(s) => format!("or-shell: {}", first_line(s)),
+        Op::Passthrough => "passthrough".to_string(),
+        Op::Cascade(branches) => format!("cascade ({} arms)", branches.len()),
         Op::Shell(s) => format!("shell: {}", first_line(s)),
         Op::Python(s) => {
             if has_pep723_header(s) {
@@ -1005,18 +1208,32 @@ fn apply_op(
         Op::Drop(pat) => Ok(filter_lines(state, |l| !pat.compiled.is_match(l))),
         Op::Head(arg) => Ok(take_head(state, resolve_head(arg, ctx.level))),
         Op::Tail(arg) => Ok(take_tail(state, resolve_head(arg, ctx.level))),
-        Op::Else(s) => Ok(if state.trim().is_empty() {
+        Op::Or(s) => Ok(if state.trim().is_empty() {
             s.clone()
         } else {
             state.to_string()
         }),
-        Op::ElseShell(cmd) => {
+        Op::OrShell(cmd) => {
             if state.trim().is_empty() {
                 let expanded = expand_args(cmd, macro_args);
                 run_shell(&expanded, raw, ctx)
             } else {
                 Ok(state.to_string())
             }
+        }
+        Op::Passthrough => Ok(state.to_string()),
+        Op::Cascade(branches) => {
+            for br in branches {
+                let hit = match &br.guard {
+                    None => true,
+                    Some(g) => guard_matches(g, ctx),
+                };
+                if hit {
+                    return run_ops(&br.ops, ctx, state, rs, macro_args);
+                }
+            }
+            // No arm matched and no `else` — leave the stream untouched.
+            Ok(state.to_string())
         }
         Op::Shell(cmd) => {
             let expanded = expand_args(cmd, macro_args);
@@ -1058,6 +1275,20 @@ fn apply_op(
             };
             Ok(join_nonempty(&pre_out, &post_out))
         }
+    }
+}
+
+/// A guard holds when every atom holds (AND).
+fn guard_matches(g: &Guard, ctx: &ExecCtx) -> bool {
+    g.atoms.iter().all(|a| atom_matches(a, ctx))
+}
+
+fn atom_matches(a: &Atom, ctx: &ExecCtx) -> bool {
+    match a {
+        Atom::Exit(ExitMatch::Ok) => ctx.exit_code == 0,
+        Atom::Exit(ExitMatch::Failed) => ctx.exit_code != 0,
+        Atom::Level(l) => *l == ctx.level,
+        Atom::Flag(f) => ctx.args.iter().any(|arg| arg == f),
     }
 }
 
@@ -1355,8 +1586,8 @@ status:
 "#,
         );
         match &rs.rules[0].ops[2] {
-            Op::Else(s) => assert_eq!(s, "clean"),
-            _ => panic!("expected Else"),
+            Op::Or(s) => assert_eq!(s, "clean"),
+            _ => panic!("expected Or"),
         }
     }
 
@@ -1452,8 +1683,8 @@ diff, ultra:  compact 30  else-shell: awk 'NF' | head -50
         assert_eq!(ops.len(), 2);
         assert!(matches!(&ops[0], Op::MacroCall { name, .. } if name == "compact"));
         match &ops[1] {
-            Op::ElseShell(s) => assert_eq!(s, "awk 'NF' | head -50"),
-            _ => panic!("expected ElseShell, got {:?}", &ops[1]),
+            Op::OrShell(s) => assert_eq!(s, "awk 'NF' | head -50"),
+            _ => panic!("expected OrShell, got {:?}", &ops[1]),
         }
     }
 
@@ -1607,9 +1838,9 @@ foo:
         // Catch-all
         assert!(rs.select("nothing", Level::Full).is_some());
 
-        // Show rule with split has the structure we expect
+        // Show rule is now a level cascade.
         let show_full = rs.select("show", Level::Full).unwrap();
-        assert!(matches!(&show_full.ops[0], Op::Split { .. }));
+        assert!(matches!(&show_full.ops[0], Op::Cascade(_)));
     }
 
     // ── executor ─────────────────────────────────────────────────
@@ -1909,5 +2140,100 @@ foo:
         assert!(rs.select("logs", Level::Full).is_some());
         assert!(rs.select("events", Level::Ultra).is_some());
         assert!(rs.select("describe", Level::Full).is_some()); // catch-all
+    }
+
+    // ── v2: cascades, guards, globs ───────────────────────────────
+
+    #[test]
+    fn parse_cascade_arms() {
+        let rs = parse_ok(
+            r#"
+diff:
+    if exit failed: passthrough
+    elif level ultra: head 5
+    else: head 99
+"#,
+        );
+        match &rs.rules[0].ops[..] {
+            [Op::Cascade(branches)] => {
+                assert_eq!(branches.len(), 3);
+                assert!(branches[0].guard.is_some());
+                assert!(branches[1].guard.is_some());
+                assert!(branches[2].guard.is_none());
+            }
+            other => panic!("expected one Cascade op, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exec_cascade_branches_on_exit() {
+        let rs = parse_ok(
+            r#"
+diff:
+    if exit failed: passthrough
+    else: head 1
+"#,
+        );
+        let input = "a\nb\nc\n";
+        let failed = ExecCtx { sub: "diff", level: Level::Full, exit_code: 1, args: &[] };
+        let ok = ExecCtx { sub: "diff", level: Level::Full, exit_code: 0, args: &[] };
+        assert_eq!(execute(&rs, &failed, input).unwrap(), "a\nb\nc\n");
+        assert_eq!(execute(&rs, &ok, input).unwrap(), "a\n");
+    }
+
+    #[test]
+    fn exec_cascade_level_and_flag_guards() {
+        let rs = parse_ok(
+            r#"
+diff:
+    if level ultra and --stat: head 1
+    elif --stat: head 2
+    else: head 3
+"#,
+        );
+        let input = "1\n2\n3\n4\n";
+        let stat = vec!["--stat".to_string()];
+        let ultra_stat = ExecCtx { sub: "diff", level: Level::Ultra, exit_code: 0, args: &stat };
+        let full_stat = ExecCtx { sub: "diff", level: Level::Full, exit_code: 0, args: &stat };
+        let plain = ExecCtx { sub: "diff", level: Level::Full, exit_code: 0, args: &[] };
+        assert_eq!(execute(&rs, &ultra_stat, input).unwrap(), "1\n");
+        assert_eq!(execute(&rs, &full_stat, input).unwrap(), "1\n2\n");
+        assert_eq!(execute(&rs, &plain, input).unwrap(), "1\n2\n3\n");
+    }
+
+    #[test]
+    fn exec_cascade_no_match_no_else_passes_through() {
+        let rs = parse_ok("diff:\n    if exit failed: head 1\n");
+        let out = execute(&rs, &ctx("diff", Level::Full), "x\ny\n").unwrap();
+        assert_eq!(out, "x\ny\n");
+    }
+
+    #[test]
+    fn exec_passthrough_is_identity() {
+        let rs = parse_ok("diff:\n    passthrough\n");
+        let out = execute(&rs, &ctx("diff", Level::Full), "x\ny\n").unwrap();
+        assert_eq!(out, "x\ny\n");
+    }
+
+    #[test]
+    fn glob_selector_matches_prefix() {
+        let rs = parse_ok("apply*:\n    head 1\n");
+        assert!(rs.select("apply", Level::Full).is_some());
+        assert!(rs.select("apply-set", Level::Full).is_some());
+        assert!(rs.select("delete", Level::Full).is_none());
+    }
+
+    #[test]
+    fn or_is_alias_of_else() {
+        let new = parse_ok("s:\n    keep /Z/\n    or \"clean\"\n");
+        let old = parse_ok("s:\n    keep /Z/\n    else \"clean\"\n");
+        assert_eq!(execute(&new, &ctx("s", Level::Full), "nope\n").unwrap(), "clean\n");
+        assert_eq!(execute(&old, &ctx("s", Level::Full), "nope\n").unwrap(), "clean\n");
+    }
+
+    #[test]
+    fn errors_on_unknown_guard_value() {
+        let chain = format!("{:#}", parse("diff:\n    if exit boom: head 1\n").unwrap_err());
+        assert!(chain.contains("unknown exit value"), "got: {chain}");
     }
 }

@@ -27,45 +27,57 @@ define compact-diff(limit):
         '
 
 # ── status ────────────────────────────────────────────────────────
+# Default `git status` is long-format — file entries are tab-indented;
+# section headers and hints are not. (`-s` porcelain also tab-free, so
+# this targets the common, un-flagged case.)
 status:
-    keep /^\s*[MADRCU?!] /
+    keep /^\t/
     head 30
-    else "git status: clean"
+    or "git status: clean"
 
 # ── diff ──────────────────────────────────────────────────────────
-diff, ultra:    compact-diff 30     else-shell: awk 'NF' | head -50
-diff, lite:     compact-diff 400    else-shell: awk 'NF' | head -50
-diff:           compact-diff 200    else-shell: awk 'NF' | head -50
+diff:
+    if exit failed:
+        passthrough
+    elif level ultra:
+        compact-diff 30
+        or-shell: awk 'NF' | head -50
+    elif level lite:
+        compact-diff 400
+        or-shell: awk 'NF' | head -50
+    else:
+        compact-diff 200
+        or-shell: awk 'NF' | head -50
 
 # ── log ───────────────────────────────────────────────────────────
-log, ultra:
-    keep /^(commit |    )/
-    strip-trailers
-    abbrev-hash
-    head 10
-
 log:
-    strip-trailers
-    abbrev-hash
-    head 25
-
-# ── show ──────────────────────────────────────────────────────────
-show, ultra:
-    keep /^(commit |Author:|Date:|    |diff --git)/
-    strip-trailers
-    abbrev-hash
-    head 20
-
-# Full/lite: split at first `diff `, run separate chains on each half.
-show:
-    split /^diff /
-    pre:
-        keep /^(commit |Merge:|Author:|Date:|    )/
+    if level ultra:
+        keep /^(commit |    )/
         strip-trailers
         abbrev-hash
-    post:
-        compact-diff 100
-    head 100
+        head 10
+    else:
+        strip-trailers
+        abbrev-hash
+        head 25
+
+# ── show ──────────────────────────────────────────────────────────
+show:
+    if level ultra:
+        keep /^(commit |Author:|Date:|    |diff --git)/
+        strip-trailers
+        abbrev-hash
+        head 20
+    else:
+        # split at first `diff `, run separate chains on each half
+        split /^diff /
+        pre:
+            keep /^(commit |Merge:|Author:|Date:|    )/
+            strip-trailers
+            abbrev-hash
+        post:
+            compact-diff 100
+        head 100
 
 # ── default ───────────────────────────────────────────────────────
 *:

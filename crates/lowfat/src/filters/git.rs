@@ -78,28 +78,20 @@ fn filter_status(raw: &str, level: Level) -> String {
 
     let lines: Vec<&str> = raw
         .lines()
-        .filter(|line| match level {
-            // Ultra: only short-status file lines (e.g. " M src/main.rs")
-            Level::Ultra => {
-                let trimmed = line.trim_start();
-                trimmed.len() >= 2
-                    && trimmed.as_bytes().get(1).copied() == Some(b' ')
-                    && is_status_char(trimmed.as_bytes()[0])
+        .filter(|line| {
+            if is_file_entry(line) {
+                return true;
             }
-            // Lite: status lines + context headers
-            Level::Lite => {
-                let trimmed = line.trim_start();
-                is_status_line(trimmed)
-                    || trimmed.starts_with("## ")
-                    || trimmed.starts_with("On branch")
-                    || trimmed.starts_with("Changes")
-                    || trimmed.starts_with("Untracked")
+            // Ultra wants file entries only. Full/Lite also keep the section
+            // headers that carry long-format's staged-vs-unstaged context.
+            if level == Level::Ultra {
+                return false;
             }
-            // Full: status lines + branch header
-            Level::Full => {
-                let trimmed = line.trim_start();
-                is_status_line(trimmed) || trimmed.starts_with("## ")
-            }
+            let t = line.trim_start();
+            t.starts_with("## ")
+                || t.starts_with("On branch")
+                || t.starts_with("Changes")
+                || t.starts_with("Untracked")
         })
         .take(limit)
         .collect();
@@ -304,6 +296,12 @@ fn is_status_line(s: &str) -> bool {
             && s.as_bytes()[2] == b' '
 }
 
+/// A `git status` file line — long-format (tab-indented, e.g.
+/// `\tmodified:   file`) or short/porcelain (`-s`, status codes up front).
+fn is_file_entry(line: &str) -> bool {
+    line.starts_with('\t') || is_status_line(line.trim_start())
+}
+
 fn is_commit_header(l: &str) -> bool {
     l.starts_with("commit ")
         || l.starts_with("Merge:")
@@ -383,6 +381,26 @@ mod tests {
         let out = filter_status(raw, Level::Full);
         assert!(out.contains("src/main.rs"));
         assert!(out.contains("Cargo.toml"));
+    }
+
+    #[test]
+    fn status_long_format_keeps_file_entries() {
+        // Default `git status` — file entries are tab-indented, hints are not.
+        let raw = "On branch main\n\nChanges not staged for commit:\n  (use \"git add <file>...\")\n\tmodified:   Cargo.toml\n\tmodified:   src/main.rs\n\nUntracked files:\n  (use \"git add <file>...\")\n\tnew.rs\n";
+        let out = filter_status(raw, Level::Full);
+        assert!(out.contains("modified:   Cargo.toml"), "keep entries: {out}");
+        assert!(out.contains("src/main.rs"));
+        assert!(out.contains("new.rs"), "keep untracked: {out}");
+        assert!(!out.contains("(use \"git add"), "drop hint lines: {out}");
+        assert_ne!(out, "git status: clean");
+    }
+
+    #[test]
+    fn status_long_format_ultra_files_only() {
+        let raw = "On branch main\n\nChanges not staged for commit:\n\tmodified:   a.rs\n";
+        let out = filter_status(raw, Level::Ultra);
+        assert!(out.contains("a.rs"), "keep file: {out}");
+        assert!(!out.contains("On branch"), "ultra drops headers: {out}");
     }
 
     #[test]

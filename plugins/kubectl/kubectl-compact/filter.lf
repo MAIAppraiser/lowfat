@@ -50,22 +50,22 @@ get:
     head 200
 
 # ── logs ──────────────────────────────────────────────────────────
-logs, ultra:
-    keep /ERROR|FATAL|panic|Exception/
-    tail 30
-    else "no errors in window"
-
 logs:
-    drop /^\s*$/
-    tail 60
+    if level ultra:
+        keep /ERROR|FATAL|panic|Exception/
+        tail 30
+        or "no errors in window"
+    else:
+        drop /^\s*$/
+        tail 60
 
 # ── events ────────────────────────────────────────────────────────
-events, ultra:
-    keep /Warning|Error/
-    tail 20
-
 events:
-    tail 40
+    if level ultra:
+        keep /Warning|Error/
+        tail 20
+    else:
+        tail 40
 
 # ── default ───────────────────────────────────────────────────────
 *:

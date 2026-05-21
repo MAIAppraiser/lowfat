@@ -5,8 +5,10 @@ use lowfat_core::pipeline::{Pipeline, StageType};
 use lowfat_core::tee;
 use lowfat_plugin::discovery::{discover_plugins, resolve_plugins, DiscoveredPlugin};
 use lowfat_plugin::plugin::{FilterInput, FilterPlugin};
+use lowfat_plugin::security::is_trusted;
 use lowfat_runner::runner::{exec_command, execute_pipeline, HybridRunner};
 use std::collections::HashMap;
+use std::path::Path;
 use std::time::Instant;
 
 /// Main filter path: execute command, apply pipeline, track metrics.
@@ -38,18 +40,32 @@ pub fn run(args: &[String]) -> i32 {
         }
     };
 
-    // Resolve which filter/pipeline to use
-    let filter_name = resolve_filter_name(cmd, &all_filters, &external_plugins, &external_map);
+    // Resolve which filter/pipeline to use. A trusted external plugin
+    // overrides a same-named builtin.
+    let resolved = resolve_filter(
+        cmd,
+        &all_filters,
+        &external_plugins,
+        &external_map,
+        &config.home_dir,
+    );
+    let filter_name = resolved.as_ref().map(|(name, _)| name.clone());
+    let is_external_plugin = resolved.map(|(_, ext)| ext).unwrap_or(false);
     let pipeline = resolve_pipeline(cmd, exit_code, &raw, &config, &filter_name,
         &external_plugins, &external_map);
 
-    // Capture native-vs-external before `all_filters` is moved into plugin_map.
-    // Native builtins shadow any external plugin of the same name in
-    // `resolve_filter_name`, so a hit here means the handler is not external.
-    let cmd_is_native_builtin = all_filters.contains_key(cmd);
-
     // Build plugin map for pipeline execution: builtins + loaded community plugins
     let mut plugin_map: HashMap<String, Box<dyn FilterPlugin>> = all_filters;
+    // A resolved external plugin overrides any same-named builtin: load it and
+    // take over that slot. `builtins()` also registers each builtin under its
+    // plugin name, so without this the builtin would win the map lookup.
+    if is_external_plugin {
+        if let Some(ref name) = filter_name {
+            if let Some(ext) = load_external_plugin(name, &external_plugins, &external_map) {
+                plugin_map.insert(name.clone(), ext);
+            }
+        }
+    }
     for stage in &pipeline.stages {
         if stage.stage_type == StageType::Plugin
             && !plugin_map.contains_key(&stage.name)
@@ -98,10 +114,6 @@ pub fn run(args: &[String]) -> i32 {
         // `known` means "no subcommand restriction" — treat as universal.
         let in_scope = filter_name.is_some()
             && (known.is_empty() || known.iter().any(|s| s == &subcommand));
-        // Distinguish where the handler comes from. `resolve_filter_name` checks
-        // native builtins first, so a builtin shadows any external plugin of the
-        // same name — meaning a hit in `all_filters` rules out the external path.
-        let is_external_plugin = filter_name.is_some() && !cmd_is_native_builtin;
         let raw_tokens = lowfat_core::tokens::estimate_tokens(&raw) as u64;
         let filtered_tokens = lowfat_core::tokens::estimate_tokens(&filtered) as u64;
         let _ = db.record_invocation(&InvocationRecord {
@@ -125,20 +137,29 @@ pub fn run(args: &[String]) -> i32 {
     exit_code
 }
 
-/// Find filter name for a command: native builtins first, then community plugins.
-fn resolve_filter_name(
+/// Resolve the filter for a command, as `(name, is_external)`.
+///
+/// A *trusted* external plugin overrides a same-named builtin — this is how a
+/// user replaces a built-in filter by installing their own plugin. An
+/// untrusted external is not allowed to shadow a builtin (it would fail to
+/// load and degrade to passthrough), but it still applies when there is no
+/// builtin for the command.
+fn resolve_filter(
     cmd: &str,
     builtins: &HashMap<String, Box<dyn FilterPlugin>>,
     plugins: &[DiscoveredPlugin],
     cmd_map: &HashMap<String, usize>,
-) -> Option<String> {
-    // Native builtin? The map key is the command name, filter name is "{cmd}-compact"
-    if builtins.contains_key(cmd) {
-        return Some(cmd.to_string());
-    }
-    // Community plugin?
+    home_dir: &Path,
+) -> Option<(String, bool)> {
+    let has_builtin = builtins.contains_key(cmd);
     if let Some(&idx) = cmd_map.get(cmd) {
-        return Some(plugins[idx].manifest.plugin.name.clone());
+        let name = plugins[idx].manifest.plugin.name.clone();
+        if !has_builtin || is_trusted(&name, home_dir) {
+            return Some((name, true));
+        }
+    }
+    if has_builtin {
+        return Some((cmd.to_string(), false));
     }
     None
 }
