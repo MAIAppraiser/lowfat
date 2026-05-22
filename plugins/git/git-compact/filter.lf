@@ -27,11 +27,10 @@ define compact-diff(limit):
         '
 
 # ── status ────────────────────────────────────────────────────────
-# Default `git status` is long-format — file entries are tab-indented;
-# section headers and hints are not. (`-s` porcelain also tab-free, so
-# this targets the common, un-flagged case.)
+# File entries in both shapes: long-format (default) indents them with a
+# tab; short/porcelain (`-s`) prefixes two status-code columns.
 status:
-    keep /^\t/
+    keep /^(\t|[ MADRCU?!]{2} )/
     head 30
     or "git status: clean"
 

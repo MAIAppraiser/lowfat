@@ -58,8 +58,9 @@ abbreviate_commit_hash() {
 
 case "$SUB" in
   status)
-    # Long-format file entries are tab-indented; section headers/hints are not.
-    result=$(echo "$RAW" | grep -E '^	' | head -n 30)
+    # File entries: long-format indents with a tab; short/porcelain (-s)
+    # prefixes two status-code columns.
+    result=$(echo "$RAW" | grep -E '^(	|[ MADRCU?!]{2} )' | head -n 30)
     if [ -z "$result" ]; then
       echo "git status: clean"
     else
