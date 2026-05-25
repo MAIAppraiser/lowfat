@@ -201,6 +201,7 @@ const OP_KEYWORDS: &[&str] = &[
     "passthrough",
     "if",
     "elif",
+    "match",
 ];
 
 pub fn parse(input: &str) -> Result<RuleSet> {
@@ -368,14 +369,18 @@ impl<'a> Parser<'a> {
         Ok(ops)
     }
 
-    /// An indented rule body: a plain pipeline, or an `if`/`elif`/`else`
-    /// cascade when the first significant line opens with `if`.
+    /// An indented rule body: a plain pipeline, or a cascade when the
+    /// first significant line opens with `if` (full cascade) or `match`
+    /// (single-dimension sugar). Both desugar to `Op::Cascade`.
     fn parse_body(&mut self, parent_indent: usize) -> Result<Vec<Op>> {
         if let Some(line) = self.peek_significant() {
             if line.indent > parent_indent {
-                let (head, _) = split_first_word(&line.text);
-                if head == "if" {
+                if is_body_opener(&line.text, "if") {
                     let branches = self.parse_cascade(parent_indent)?;
+                    return Ok(vec![Op::Cascade(branches)]);
+                }
+                if is_body_opener(&line.text, "match") {
+                    let branches = self.parse_match(parent_indent)?;
                     return Ok(vec![Op::Cascade(branches)]);
                 }
             }
@@ -446,13 +451,124 @@ impl<'a> Parser<'a> {
         } else {
             Some(parse_guard(guard_str, line_no)?)
         };
-        let mut ops = Vec::new();
-        if !after.is_empty() {
-            ops.extend(self.parse_inline_ops(after, line_no)?);
-        }
-        ops.extend(self.parse_indented_ops(indent)?);
+        let ops = self.parse_arm_body(after, indent, line_no)?;
         if ops.is_empty() {
             bail!("line {}: `{}` arm has no ops", line_no, head);
+        }
+        Ok(Branch { guard, ops })
+    }
+
+    /// Body of one arm — used by `if`/`elif`/`else` and by `match` arms.
+    /// Inline ops after `:` force a pipeline body; otherwise the body may
+    /// be a nested cascade (`if` or `match`) or a plain indented pipeline.
+    fn parse_arm_body(
+        &mut self,
+        inline: &str,
+        indent: usize,
+        line_no: usize,
+    ) -> Result<Vec<Op>> {
+        let mut ops = Vec::new();
+        if !inline.is_empty() {
+            ops.extend(self.parse_inline_ops(inline, line_no)?);
+        }
+        if ops.is_empty() {
+            if let Some(child) = self.peek_significant() {
+                if child.indent > indent {
+                    if is_body_opener(&child.text, "if") {
+                        return Ok(vec![Op::Cascade(self.parse_cascade(indent)?)]);
+                    }
+                    if is_body_opener(&child.text, "match") {
+                        return Ok(vec![Op::Cascade(self.parse_match(indent)?)]);
+                    }
+                }
+            }
+        }
+        ops.extend(self.parse_indented_ops(indent)?);
+        Ok(ops)
+    }
+
+    /// Sugar for a single-dimension cascade.
+    ///   match level:
+    ///       ultra: head 30
+    ///       lite:  head 200
+    ///       else:  head 80
+    /// desugars to `if level ultra: … elif level lite: … else: …`.
+    /// The dimension is `level` or `exit`; flags require the full `if` form.
+    fn parse_match(&mut self, parent_indent: usize) -> Result<Vec<Branch>> {
+        let header = self.advance().unwrap();
+        let line_no = header.line_no;
+        // Accept `match`, `match:`, or `match <dim>:` uniformly. The
+        // is_body_opener gate above guarantees text starts with "match".
+        let rest = header
+            .text
+            .strip_prefix("match")
+            .ok_or_else(|| anyhow!("line {}: expected `match`", line_no))?
+            .trim_start();
+        let colon = rest
+            .find(':')
+            .ok_or_else(|| anyhow!("line {}: missing `:` after match dimension", line_no))?;
+        let dim_str = rest[..colon].trim();
+        let trailing = rest[colon + 1..].trim();
+        if !trailing.is_empty() {
+            bail!(
+                "line {}: `match` header doesn't take inline ops (got `{}`)",
+                line_no,
+                trailing
+            );
+        }
+        let dim = parse_match_dim(dim_str, line_no)?;
+
+        let mut branches: Vec<Branch> = Vec::new();
+        let mut arm_indent: Option<usize> = None;
+        loop {
+            let Some(line) = self.peek_significant() else {
+                break;
+            };
+            if line.indent <= parent_indent {
+                break;
+            }
+            match arm_indent {
+                None => arm_indent = Some(line.indent),
+                Some(ai) if line.indent != ai => break,
+                Some(_) => {}
+            }
+            let branch = self.parse_match_arm(dim)?;
+            let is_else = branch.guard.is_none();
+            branches.push(branch);
+            if is_else {
+                break;
+            }
+        }
+
+        if branches.is_empty() {
+            bail!("line {}: `match` has no arms", line_no);
+        }
+        Ok(branches)
+    }
+
+    /// One `match` arm: `<value>: <ops>` or `else: <ops>`. Builds the
+    /// guard atom by interpreting `<value>` against the captured `dim`.
+    fn parse_match_arm(&mut self, dim: MatchDim) -> Result<Branch> {
+        let line = self.advance().unwrap();
+        let line_no = line.line_no;
+        let indent = line.indent;
+        let colon = line
+            .text
+            .find(':')
+            .ok_or_else(|| anyhow!("line {}: missing `:` in match arm", line_no))?;
+        let value = line.text[..colon].trim();
+        let after = line.text[colon + 1..].trim();
+
+        let guard = if value == "else" {
+            None
+        } else {
+            let atom = build_match_atom(dim, value, line_no)?;
+            Some(Guard { atoms: vec![atom] })
+        };
+
+        let ops = self.parse_arm_body(after, indent, line_no)?;
+        if ops.is_empty() {
+            bail!("line {}: match arm `{}` has no ops", line_no, value);
         }
         Ok(Branch { guard, ops })
     }
@@ -720,6 +836,16 @@ impl<'a> Parser<'a> {
 // Sub-parsers (free functions, no Parser state)
 // ──────────────────────────────────────────────────────────────────
 
+/// True when `text` opens with `kw` followed by whitespace, a `:`, or
+/// end of input — i.e. `kw` introduces a body construct rather than
+/// being a prefix of some other word (`matching`, `iffy`).
+fn is_body_opener(text: &str, kw: &str) -> bool {
+    match text.strip_prefix(kw) {
+        None => false,
+        Some(rest) => rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace() || c == ':'),
+    }
+}
+
 fn split_first_word(s: &str) -> (&str, &str) {
     let s = s.trim_start();
     let end = s.find(char::is_whitespace).unwrap_or(s.len());
@@ -831,6 +957,48 @@ fn parse_atom(s: &str, line_no: usize) -> Result<Atom> {
             line_no,
             other
         ),
+    }
+}
+
+/// Closed set of dimensions a `match` header may switch on. Flags are
+/// not a `match` dimension — their presence is binary, with no "values"
+/// to enumerate, so they must use `if --flag: ...` instead.
+#[derive(Copy, Clone)]
+enum MatchDim {
+    Level,
+    Exit,
+}
+
+fn parse_match_dim(s: &str, line_no: usize) -> Result<MatchDim> {
+    match s {
+        "level" => Ok(MatchDim::Level),
+        "exit" => Ok(MatchDim::Exit),
+        "" => bail!("line {}: `match` needs a dimension (level|exit)", line_no),
+        other => bail!(
+            "line {}: unknown match dimension `{}` (expected level|exit; flags must use `if --flag:`)",
+            line_no,
+            other
+        ),
+    }
+}
+
+fn build_match_atom(dim: MatchDim, value: &str, line_no: usize) -> Result<Atom> {
+    match dim {
+        MatchDim::Level => {
+            let lvl: Level = value
+                .parse()
+                .map_err(|e: String| anyhow!("line {line_no}: {e}"))?;
+            Ok(Atom::Level(lvl))
+        }
+        MatchDim::Exit => match value {
+            "ok" => Ok(Atom::Exit(ExitMatch::Ok)),
+            "failed" => Ok(Atom::Exit(ExitMatch::Failed)),
+            other => bail!(
+                "line {}: unknown exit value `{}` (expected ok|failed)",
+                line_no,
+                other
+            ),
+        },
     }
 }
 
@@ -2240,5 +2408,140 @@ diff:
     fn errors_on_unknown_guard_value() {
         let chain = format!("{:#}", parse("diff:\n    if exit boom: head 1\n").unwrap_err());
         assert!(chain.contains("unknown exit value"), "got: {chain}");
+    }
+
+    // ── match: single-dimension cascade sugar ─────────────────────
+
+    #[test]
+    fn parse_match_level_desugars_to_cascade() {
+        let rs = parse_ok(
+            r#"
+state:
+    match level:
+        ultra: head 1
+        lite:  head 3
+        else:  head 2
+"#,
+        );
+        match &rs.rules[0].ops[..] {
+            [Op::Cascade(branches)] => {
+                assert_eq!(branches.len(), 3);
+                assert!(matches!(
+                    branches[0].guard.as_ref().unwrap().atoms.as_slice(),
+                    [Atom::Level(Level::Ultra)]
+                ));
+                assert!(matches!(
+                    branches[1].guard.as_ref().unwrap().atoms.as_slice(),
+                    [Atom::Level(Level::Lite)]
+                ));
+                assert!(branches[2].guard.is_none());
+            }
+            other => panic!("expected one Cascade op, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exec_match_level_matches_equivalent_cascade() {
+        let m = parse_ok(
+            r#"
+state:
+    match level:
+        ultra: head 1
+        lite:  head 3
+        else:  head 2
+"#,
+        );
+        let c = parse_ok(
+            r#"
+state:
+    if level ultra: head 1
+    elif level lite: head 3
+    else: head 2
+"#,
+        );
+        let input = "a\nb\nc\nd\n";
+        for level in [Level::Ultra, Level::Full, Level::Lite] {
+            let mc = execute(&m, &ctx("state", level), input).unwrap();
+            let cc = execute(&c, &ctx("state", level), input).unwrap();
+            assert_eq!(mc, cc, "level {level:?}");
+        }
+    }
+
+    #[test]
+    fn exec_match_exit() {
+        let rs = parse_ok(
+            r#"
+diff:
+    match exit:
+        failed: raw
+        ok: head 1
+"#,
+        );
+        let input = "a\nb\nc\n";
+        let failed = ExecCtx { sub: "diff", level: Level::Full, exit_code: 1, args: &[] };
+        let okctx = ExecCtx { sub: "diff", level: Level::Full, exit_code: 0, args: &[] };
+        assert_eq!(execute(&rs, &failed, input).unwrap(), "a\nb\nc\n");
+        assert_eq!(execute(&rs, &okctx, input).unwrap(), "a\n");
+    }
+
+    #[test]
+    fn exec_nested_match_inside_else_arm() {
+        let rs = parse_ok(
+            r#"
+plan:
+    if exit failed:
+        raw
+    else:
+        match level:
+            ultra: head 1
+            lite:  head 3
+            else:  head 2
+"#,
+        );
+        let input = "a\nb\nc\nd\n";
+        let failed = ExecCtx { sub: "plan", level: Level::Full, exit_code: 1, args: &[] };
+        let ok_full = ExecCtx { sub: "plan", level: Level::Full, exit_code: 0, args: &[] };
+        let ok_ultra = ExecCtx { sub: "plan", level: Level::Ultra, exit_code: 0, args: &[] };
+        let ok_lite = ExecCtx { sub: "plan", level: Level::Lite, exit_code: 0, args: &[] };
+        assert_eq!(execute(&rs, &failed, input).unwrap(), input);
+        assert_eq!(execute(&rs, &ok_full, input).unwrap(), "a\nb\n");
+        assert_eq!(execute(&rs, &ok_ultra, input).unwrap(), "a\n");
+        assert_eq!(execute(&rs, &ok_lite, input).unwrap(), "a\nb\nc\n");
+    }
+
+    #[test]
+    fn match_missing_dimension_errors() {
+        let chain = format!("{:#}", parse("plan:\n    match:\n        ultra: head 1\n").unwrap_err());
+        assert!(chain.contains("needs a dimension"), "got: {chain}");
+    }
+
+    #[test]
+    fn match_unknown_dimension_errors() {
+        let chain = format!(
+            "{:#}",
+            parse("plan:\n    match flag:\n        x: head 1\n").unwrap_err()
+        );
+        assert!(chain.contains("unknown match dimension"), "got: {chain}");
+    }
+
+    #[test]
+    fn match_unknown_value_errors() {
+        let chain = format!(
+            "{:#}",
+            parse("plan:\n    match exit:\n        boom: head 1\n").unwrap_err()
+        );
+        assert!(chain.contains("unknown exit value"), "got: {chain}");
+    }
+
+    #[test]
+    fn match_inline_after_header_errors() {
+        let chain = format!(
+            "{:#}",
+            parse("plan:\n    match level: head 1\n").unwrap_err()
+        );
+        assert!(
+            chain.contains("doesn't take inline ops"),
+            "got: {chain}"
+        );
     }
 }
