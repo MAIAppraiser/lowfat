@@ -101,6 +101,7 @@ cat samples/git-diff-full.txt | lowfat filter --explain ./filter.lf --sub=diff -
 
 ### Learn more
 
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — high-level diagram: CLI, Runner, Plugins, Builtins
 - **[docs/CONFIG.md](docs/CONFIG.md)** — `.lowfat` file, env vars, pipeline DSL, built-in processors, the `history` ranking
 - **[docs/PLUGINS.md](docs/PLUGINS.md)** — lf-filter (the `.lf` plugin DSL), shell escape hatches, PEP 723 + uv, AI agent prompt
 
