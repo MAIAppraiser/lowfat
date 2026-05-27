@@ -1,9 +1,92 @@
 use anyhow::Result;
 use lowfat_core::config::RunfConfig;
 use lowfat_core::lf::{self, Op};
-use lowfat_plugin::discovery::discover_plugins;
+use lowfat_plugin::discovery::{discover_plugins, DiscoveredPlugin};
 use std::io::Write;
 use std::process::{Command, Stdio};
+
+/// One row in a `lowfat plugin bench` table.
+pub struct BenchRow {
+    pub sample_name: String,
+    pub level: lowfat_core::level::Level,
+    pub raw_tokens: usize,
+    pub filtered_tokens: usize,
+}
+
+/// Run every `.txt` sample under `<plugin>/samples/` through the plugin and
+/// return token counts. Pure (no printing, no globals) so this is unit-testable.
+///
+/// Sample filename convention: `<command>-<subcommand>-<level>.txt`. Anything
+/// shorter falls back to `level=full`. Dispatch goes through `HybridRunner`,
+/// which picks `LfFilter` for `.lf` and `ProcessFilter` for shell — calling
+/// `ProcessFilter` directly here would mis-handle `.lf` (sh can't parse the
+/// DSL → empty stdout → 0 tokens, the bug this helper exists to prevent).
+pub fn collect_bench_rows(plugin: &DiscoveredPlugin) -> Result<Vec<BenchRow>> {
+    let samples_dir = plugin.base_dir.join("samples");
+    if !samples_dir.is_dir() {
+        anyhow::bail!(
+            "no samples/ directory in plugin '{}' — add .txt files with sample command output",
+            plugin.manifest.plugin.name
+        );
+    }
+
+    let mut entries: Vec<_> = std::fs::read_dir(&samples_dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().map_or(false, |ext| ext == "txt"))
+        .collect();
+    entries.sort_by_key(|e| e.path());
+
+    if entries.is_empty() {
+        anyhow::bail!("no .txt sample files in {}", samples_dir.display());
+    }
+
+    let filter = lowfat_runner::runner::HybridRunner::load(plugin)?;
+    let mut rows = Vec::with_capacity(entries.len());
+
+    for entry in &entries {
+        let path = entry.path();
+        let sample_name = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+
+        // <command>-<subcommand>-<level>; shorter forms default to level=full.
+        let parts: Vec<&str> = sample_name.split('-').collect();
+        let (command, subcommand, level_str) = match parts.len() {
+            1 => (parts[0], "", "full"),
+            2 => (parts[0], parts[1], "full"),
+            _ => (parts[0], parts[1], parts[parts.len() - 1]),
+        };
+
+        let level = match level_str {
+            "lite" => lowfat_core::level::Level::Lite,
+            "ultra" => lowfat_core::level::Level::Ultra,
+            _ => lowfat_core::level::Level::Full,
+        };
+
+        let raw = std::fs::read_to_string(&path)?;
+        let raw_tokens = lowfat_core::tokens::estimate_tokens(&raw);
+
+        let input = lowfat_plugin::plugin::FilterInput {
+            raw: raw.clone(),
+            command: command.to_string(),
+            subcommand: subcommand.to_string(),
+            args: vec![],
+            level,
+            head_limit: level.head_limit(40),
+            exit_code: 0,
+        };
+
+        let result = filter.filter(&input)?;
+        let filtered_tokens = lowfat_core::tokens::estimate_tokens(&result.text);
+
+        rows.push(BenchRow {
+            sample_name,
+            level,
+            raw_tokens,
+            filtered_tokens,
+        });
+    }
+
+    Ok(rows)
+}
 
 pub fn list() -> Result<()> {
     let config = RunfConfig::resolve();
@@ -348,34 +431,7 @@ pub fn bench(name: &str) -> Result<()> {
         }
     };
 
-    let samples_dir = plugin.base_dir.join("samples");
-    if !samples_dir.is_dir() {
-        anyhow::bail!("no samples/ directory in plugin '{name}' — add .txt files with sample command output");
-    }
-
-    let mut entries: Vec<_> = std::fs::read_dir(&samples_dir)?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "txt"))
-        .collect();
-    entries.sort_by_key(|e| e.path());
-
-    if entries.is_empty() {
-        anyhow::bail!("no .txt sample files in {}", samples_dir.display());
-    }
-
-    // Build the process filter
-    let process_filter = lowfat_runner::process::ProcessFilter {
-        info: lowfat_plugin::plugin::PluginInfo {
-            name: plugin.manifest.plugin.name.clone(),
-            version: plugin.manifest.plugin.version.clone().unwrap_or_default(),
-            commands: plugin.manifest.plugin.commands.clone(),
-            subcommands: plugin.manifest.plugin.subcommands.clone().unwrap_or_default(),
-        },
-        entry: plugin
-            .base_dir
-            .join(plugin.manifest.runtime.resolve_entry(&plugin.base_dir)),
-        base_dir: plugin.base_dir.clone(),
-    };
+    let rows = collect_bench_rows(plugin)?;
 
     println!("Benchmark: {name}");
     println!();
@@ -383,52 +439,20 @@ pub fn bench(name: &str) -> Result<()> {
     let mut total_raw = 0usize;
     let mut total_filtered = 0usize;
 
-    for entry in &entries {
-        let path = entry.path();
-        let sample_name = path.file_stem().unwrap_or_default().to_string_lossy();
-
-        // Parse sample name: "git-status-full.txt" → command=git, subcommand=status, level=full
-        let parts: Vec<&str> = sample_name.split('-').collect();
-        let (command, subcommand, level_str) = match parts.len() {
-            1 => (parts[0], "", "full"),
-            2 => (parts[0], parts[1], "full"),
-            _ => (parts[0], parts[1], parts[parts.len() - 1]),
-        };
-
-        let level = match level_str {
-            "lite" => lowfat_core::level::Level::Lite,
-            "ultra" => lowfat_core::level::Level::Ultra,
-            _ => lowfat_core::level::Level::Full,
-        };
-
-        let raw = std::fs::read_to_string(&path)?;
-        let raw_tokens = lowfat_core::tokens::estimate_tokens(&raw);
-
-        let input = lowfat_plugin::plugin::FilterInput {
-            raw: raw.clone(),
-            command: command.to_string(),
-            subcommand: subcommand.to_string(),
-            args: vec![],
-            level,
-            head_limit: level.head_limit(40),
-            exit_code: 0,
-        };
-
-        use lowfat_plugin::plugin::FilterPlugin;
-        let result = process_filter.filter(&input)?;
-        let filtered_tokens = lowfat_core::tokens::estimate_tokens(&result.text);
-        let pct = if raw_tokens > 0 {
-            (1.0 - filtered_tokens as f64 / raw_tokens as f64) * 100.0
+    for row in &rows {
+        let pct = if row.raw_tokens > 0 {
+            (1.0 - row.filtered_tokens as f64 / row.raw_tokens as f64) * 100.0
         } else {
             0.0
         };
-
-        total_raw += raw_tokens;
-        total_filtered += filtered_tokens;
-
+        total_raw += row.raw_tokens;
+        total_filtered += row.filtered_tokens;
         println!(
             "  {:<30} {:>6} → {:>6} tokens  ({:>-3.0}%)",
-            format!("{sample_name} ({level})"), raw_tokens, filtered_tokens, -pct
+            format!("{} ({})", row.sample_name, row.level),
+            row.raw_tokens,
+            row.filtered_tokens,
+            -pct
         );
     }
 
@@ -442,4 +466,57 @@ pub fn bench(name: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod bench_tests {
+    use super::*;
+    use lowfat_plugin::discovery::discover_plugins;
+
+    /// Regression: bench used to hand-roll `ProcessFilter` and `sh` the entry,
+    /// which made `.lf` plugins produce empty output (`0 tokens`). Catches that
+    /// by running a tiny `.lf` plugin end-to-end through `collect_bench_rows`
+    /// and asserting non-zero filtered output.
+    #[test]
+    fn bench_lf_plugin_filters_via_lf_runtime() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path().join("demo").join("demo-compact");
+        std::fs::create_dir_all(plugin.join("samples")).unwrap();
+        std::fs::write(
+            plugin.join("lowfat.toml"),
+            r#"[plugin]
+name = "demo-compact"
+commands = ["demo"]
+subcommands = ["run"]
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            plugin.join("filter.lf"),
+            "run:\n    head 2\n*:\n    head 1\n",
+        )
+        .unwrap();
+        std::fs::write(
+            plugin.join("samples").join("demo-run-full.txt"),
+            "one\ntwo\nthree\nfour\nfive\n",
+        )
+        .unwrap();
+
+        let plugins = discover_plugins(tmp.path());
+        let p = plugins
+            .iter()
+            .find(|p| p.manifest.plugin.name == "demo-compact")
+            .expect("demo-compact discovered");
+
+        let rows = collect_bench_rows(p).unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert!(row.raw_tokens > 0, "sample tokenizes to non-zero");
+        // Pre-fix bug: sh would mis-parse filter.lf and produce empty stdout → 0 tokens.
+        assert!(
+            row.filtered_tokens > 0,
+            "filter.lf must run through LfFilter (in-process), not sh — got 0 tokens"
+        );
+        assert!(row.filtered_tokens < row.raw_tokens, "head 2 trims the 5-line sample");
+    }
 }
