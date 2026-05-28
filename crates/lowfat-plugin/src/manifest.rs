@@ -22,6 +22,10 @@ pub struct PluginMeta {
     pub commands: Vec<String>,
     /// Optional: limit to specific subcommands
     pub subcommands: Option<Vec<String>>,
+    /// Optional: real binary to exec when triggered via a shorthand command.
+    /// Lets `commands = ["kubectl", "k"]` run `kubectl` even when invoked as
+    /// `k` (which is a shell alias, not a binary on PATH).
+    pub bin: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]

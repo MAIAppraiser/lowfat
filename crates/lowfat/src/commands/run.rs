@@ -30,9 +30,17 @@ pub fn run(args: &[String]) -> i32 {
     let external_plugins = discover_plugins(&config.plugin_dir);
     let external_map = resolve_plugins(&external_plugins);
 
+    // A plugin may declare `bin` to exec a different binary than the invoked
+    // name — lets a shorthand like `k` run `kubectl`. Filter routing still
+    // keys off the original `cmd`.
+    let exec_bin = external_map
+        .get(cmd)
+        .and_then(|&idx| external_plugins[idx].manifest.plugin.bin.clone())
+        .unwrap_or_else(|| cmd.clone());
+
     // Execute the real command
     let start = Instant::now();
-    let (raw, exit_code) = match exec_command(cmd, &cmd_args) {
+    let (raw, exit_code) = match exec_command(&exec_bin, &cmd_args) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("[lowfat] exec error: {e}");
