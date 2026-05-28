@@ -133,6 +133,36 @@ fn git_compact_parity() {
     check_plugin(&bundled_dir().join("git/git-compact"), 5.0);
 }
 
+// `git diff --stat` (and --name-only / --shortstat) emit no `diff `/`@@ `
+// markers, so compact-diff produces nothing. Both filters must fall back to
+// the blank-stripped raw output instead of returning empty — otherwise the
+// diffstat is silently dropped. Driven directly rather than via a sample file
+// because the filename parser would read the subcommand as `diff-stat`.
+#[test]
+fn git_diff_stat_fallback() {
+    let plugin = bundled_dir().join("git/git-compact");
+    let sh = plugin.join("filter.sh");
+    let lf = plugin.join("filter.lf");
+
+    let stat = " README.md                                | 1 +\n\
+                 crates/lowfat-runner/tests/lf_plugins.rs | 42 ++++++++++++++++++++++++\n\
+                 2 files changed, 43 insertions(+), 0 deletions(-)\n";
+
+    for level in [Level::Ultra, Level::Lite, Level::Full] {
+        let sh_out = run_sh(&sh, stat, "git", "diff", level);
+        let lf_out = run_lf(&lf, stat, "diff", level);
+
+        assert!(
+            sh_out.contains("files changed"),
+            "sh dropped diffstat at {level}:\n{sh_out}"
+        );
+        assert!(
+            lf_out.contains("files changed") && lf_out.contains("README.md"),
+            "lf dropped diffstat at {level}:\n{lf_out}"
+        );
+    }
+}
+
 #[test]
 fn cargo_compact_parity() {
     check_plugin(&repo_root().join("plugins/cargo/cargo-compact"), 10.0);
