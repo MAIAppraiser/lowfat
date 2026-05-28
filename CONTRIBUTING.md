@@ -18,7 +18,9 @@ The workspace has four crates: `lowfat-core`, `lowfat-plugin`, `lowfat-runner`, 
 
 ## Writing a plugin
 
-See [docs/PLUGINS.md](docs/PLUGINS.md). Bundled plugins live under `plugins/`.
+See [docs/PLUGINS.md](docs/PLUGINS.md). Bundled plugins live under
+`crates/lowfat-plugin/embedded/` (they ship in the binary); community plugins
+live under `plugins/`.
 
 ## Releases (maintainers)
 

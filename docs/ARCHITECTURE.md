@@ -44,8 +44,10 @@ High-level view of how `lowfat` filters command output between you and your AI a
 - **Config** (`crates/lowfat-core`) — resolves `.lowfat` TOML + env vars into a
   `RunfConfig` (level, plugin dir, conditional pipelines).
 - **Plugins** (`crates/lowfat-plugin`) — manifest + `.lf` DSL files. Bundled
-  plugins are embedded via `include_str!`; user plugins live under
-  `~/.lowfat/plugins/`. Disk wins on name collision.
+  plugins live in the crate's `embedded/` dir and are baked in via
+  `include_str!`; community plugins live at the repo-root `plugins/`; user
+  plugins live under `~/.lowfat/plugins/`. A same-named user plugin overrides
+  the bundled one.
 - **Builtins** — in-process processors (`strip-ansi`, `head`, `grep`,
   `dedup-blank`, `normalize`, …) used as pipeline stages.
 - **SQLite metrics** — `~/.lowfat/data/` tracks token savings and invocation

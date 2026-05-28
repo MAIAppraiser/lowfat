@@ -1988,7 +1988,7 @@ foo:
     #[test]
     fn git_compact_plugin_parses() {
         let src = include_str!(
-            "../../../plugins/git/git-compact/filter.lf"
+            "../../lowfat-plugin/embedded/git/git-compact/filter.lf"
         );
         let rs = parse_ok(src);
         // Defines: strip-trailers, abbrev-hash, compact-diff, drop-index-meta

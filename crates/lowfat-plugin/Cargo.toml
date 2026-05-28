@@ -6,6 +6,16 @@ license.workspace = true
 repository.workspace = true
 description = "Plugin manifest, discovery, registry for lowfat"
 
+# Only the embedded plugins' load-bearing files (lowfat.toml + filter.lf) ship
+# in the crate. Legacy .sh baselines, samples, and benchmark docs are dev/test
+# artifacts — keep them out of the published tarball.
+exclude = [
+    "embedded/**/samples",
+    "embedded/**/filter.sh",
+    "embedded/**/bench.sh",
+    "embedded/**/BENCHMARK.md",
+]
+
 [dependencies]
 lowfat-core = { workspace = true }
 anyhow = { workspace = true }

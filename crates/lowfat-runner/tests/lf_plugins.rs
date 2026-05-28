@@ -123,9 +123,14 @@ fn check_plugin(plugin_dir: &Path, tolerance_pct: f64) {
     }
 }
 
+// Bundled plugins live in the lowfat-plugin crate; community ones in plugins/.
+fn bundled_dir() -> PathBuf {
+    repo_root().join("crates/lowfat-plugin/embedded")
+}
+
 #[test]
 fn git_compact_parity() {
-    check_plugin(&repo_root().join("plugins/git/git-compact"), 5.0);
+    check_plugin(&bundled_dir().join("git/git-compact"), 5.0);
 }
 
 #[test]
@@ -135,12 +140,12 @@ fn cargo_compact_parity() {
 
 #[test]
 fn docker_compact_parity() {
-    check_plugin(&repo_root().join("plugins/docker/docker-compact"), 10.0);
+    check_plugin(&bundled_dir().join("docker/docker-compact"), 10.0);
 }
 
 #[test]
 fn ls_compact_parity() {
-    check_plugin(&repo_root().join("plugins/ls/ls-compact"), 5.0);
+    check_plugin(&bundled_dir().join("ls/ls-compact"), 5.0);
 }
 
 #[test]

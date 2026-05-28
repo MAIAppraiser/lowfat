@@ -170,3 +170,29 @@ pub fn resolve_plugins(plugins: &[DiscoveredPlugin]) -> HashMap<String, usize> {
     }
     map
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The embedded set must survive discovery: every baked-in manifest parses
+    // and its filter.lf is valid lf. `include_str!` only proves the files were
+    // found at build time, not that their contents are well-formed.
+    #[test]
+    fn embedded_plugins_discover_and_parse() {
+        // A nonexistent dir yields only the embedded set (no disk plugins).
+        let found = discover_plugins(Path::new("/nonexistent-lowfat-test-dir"));
+        let embedded: Vec<_> = found.iter().filter(|p| p.is_embedded()).collect();
+        assert_eq!(embedded.len(), EMBEDDED.len(), "all embedded plugins discovered");
+
+        for p in &embedded {
+            if let PluginSource::Embedded { filter_lf } = &p.source {
+                assert!(
+                    lowfat_core::lf::parse(filter_lf).is_ok(),
+                    "{}: embedded filter.lf failed to parse",
+                    p.manifest.plugin.name
+                );
+            }
+        }
+    }
+}
