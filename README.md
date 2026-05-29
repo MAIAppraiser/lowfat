@@ -18,9 +18,9 @@ lowfat is a lightweight CLI tool that reduces AI token costs by filtering unnece
 - **Composable** — UNIX-style pipes, mix built-ins and your own filters; not magic.
 - **User-owned** — `lowfat history` shows what you run most; allow you to customize for your usecase.
 
-### Token savings on real commands
+### Token savings
 
-Aggregated from real local usage (`lowfat stats`): **1,626 commands, 92.8% saved overall**. Ranked by most saved.
+Aggregated from real local usage (`lowfat stats`):
 
 | Command          | Raw     | Filtered | Saved   |
 | ---------------- | ------- | -------- | ------- |
