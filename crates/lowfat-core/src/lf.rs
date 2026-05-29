@@ -1458,7 +1458,32 @@ fn atom_matches(a: &Atom, ctx: &ExecCtx) -> bool {
         Atom::Exit(ExitMatch::Ok) => ctx.exit_code == 0,
         Atom::Exit(ExitMatch::Failed) => ctx.exit_code != 0,
         Atom::Level(l) => *l == ctx.level,
-        Atom::Flag(f) => ctx.args.iter().any(|arg| arg == f),
+        Atom::Flag(f) => flag_matches(f, ctx.args),
+    }
+}
+
+/// Match a flag guard against the invoked args.
+///
+/// Two shapes:
+/// - presence — `--stat` / `-o`: true if any arg is that flag, in either the
+///   bare (`--stat`) or `--flag=value` form (`--output=json` matches `--output`).
+/// - flag + value — `-o yaml` / `--output json`: true if the flag carries that
+///   value, written `-o yaml` (two tokens), `-o=yaml`, or glued short `-oyaml`.
+///
+/// Split on `=` rather than prefix-matching so `--stat` never matches
+/// `--statistics`. This is what lets a kubectl `get` rule treat `-o yaml`
+/// (prune) differently from `-o json` (pass through byte-exact).
+fn flag_matches(spec: &str, args: &[String]) -> bool {
+    match spec.split_once(char::is_whitespace) {
+        None => args.iter().any(|a| {
+            a == spec || a.split_once('=').is_some_and(|(name, _)| name == spec)
+        }),
+        Some((flag, value)) => {
+            let value = value.trim();
+            args.windows(2).any(|w| w[0] == flag && w[1] == value)
+                || args.iter().any(|a| a == &format!("{flag}={value}"))
+                || (flag.len() == 2 && args.iter().any(|a| a == &format!("{flag}{value}")))
+        }
     }
 }
 
@@ -2369,6 +2394,53 @@ diff:
         assert_eq!(execute(&rs, &ultra_stat, input).unwrap(), "1\n");
         assert_eq!(execute(&rs, &full_stat, input).unwrap(), "1\n2\n");
         assert_eq!(execute(&rs, &plain, input).unwrap(), "1\n2\n3\n");
+    }
+
+    #[test]
+    fn flag_guard_matches_equals_value_form() {
+        // A `--output` guard must fire on both `--output json` (two tokens)
+        // and `--output=json` (one token). Used so kubectl `get -o json`
+        // bypasses line-truncation that would corrupt the JSON for jq.
+        let rs = parse_ok("get:\n    if --output: raw\n    else: head 1\n");
+        let input = "{\n  \"a\": 1\n}\n";
+        let split = vec!["--output".to_string(), "json".to_string()];
+        let glued = vec!["--output=json".to_string()];
+        let none = vec!["pods".to_string()];
+        let split_ctx = ExecCtx { sub: "get", level: Level::Full, exit_code: 0, args: &split };
+        let glued_ctx = ExecCtx { sub: "get", level: Level::Full, exit_code: 0, args: &glued };
+        let none_ctx = ExecCtx { sub: "get", level: Level::Full, exit_code: 0, args: &none };
+        assert_eq!(execute(&rs, &split_ctx, input).unwrap(), input);
+        assert_eq!(execute(&rs, &glued_ctx, input).unwrap(), input);
+        // No output flag → compaction (head 1) still applies.
+        assert_eq!(execute(&rs, &none_ctx, input).unwrap(), "{\n");
+    }
+
+    #[test]
+    fn flag_guard_equals_does_not_prefix_match() {
+        // `--stat` must NOT match `--statistics` — the `=` split guards this.
+        let rs = parse_ok("diff:\n    if --stat: head 1\n    else: head 2\n");
+        let stats = vec!["--statistics".to_string()];
+        let ctx = ExecCtx { sub: "diff", level: Level::Full, exit_code: 0, args: &stats };
+        assert_eq!(execute(&rs, &ctx, "1\n2\n3\n").unwrap(), "1\n2\n");
+    }
+
+    #[test]
+    fn flag_guard_matches_flag_with_value() {
+        // `-o yaml` must fire on the two-token form, `-o=yaml`, and glued
+        // `-oyaml` — but NOT on `-o json`. This lets the kubectl get rule
+        // prune `-o yaml` while passing `-o json` through byte-exact.
+        let rs = parse_ok("get:\n    if -o yaml: head 1\n    else: raw\n");
+        let input = "a\nb\nc\n";
+        let cases = [
+            (vec!["-o".to_string(), "yaml".to_string()], "a\n"),
+            (vec!["-o=yaml".to_string()], "a\n"),
+            (vec!["-oyaml".to_string()], "a\n"),
+            (vec!["-o".to_string(), "json".to_string()], input), // else → raw
+        ];
+        for (args, want) in cases {
+            let ctx = ExecCtx { sub: "get", level: Level::Full, exit_code: 0, args: &args };
+            assert_eq!(execute(&rs, &ctx, input).unwrap(), want, "args={args:?}");
+        }
     }
 
     #[test]
