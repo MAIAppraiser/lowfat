@@ -1458,12 +1458,32 @@ fn atom_matches(a: &Atom, ctx: &ExecCtx) -> bool {
         Atom::Exit(ExitMatch::Ok) => ctx.exit_code == 0,
         Atom::Exit(ExitMatch::Failed) => ctx.exit_code != 0,
         Atom::Level(l) => *l == ctx.level,
-        // Exact token, or the `--flag=value` / `-o=value` form — a guard for
-        // `-o` / `--output` must also fire on `--output=json`. Split on `=`
-        // (not a prefix match) so `--stat` never matches `--statistics`.
-        Atom::Flag(f) => ctx.args.iter().any(|arg| {
-            arg == f || arg.split_once('=').is_some_and(|(name, _)| name == f)
+        Atom::Flag(f) => flag_matches(f, ctx.args),
+    }
+}
+
+/// Match a flag guard against the invoked args.
+///
+/// Two shapes:
+/// - presence — `--stat` / `-o`: true if any arg is that flag, in either the
+///   bare (`--stat`) or `--flag=value` form (`--output=json` matches `--output`).
+/// - flag + value — `-o yaml` / `--output json`: true if the flag carries that
+///   value, written `-o yaml` (two tokens), `-o=yaml`, or glued short `-oyaml`.
+///
+/// Split on `=` rather than prefix-matching so `--stat` never matches
+/// `--statistics`. This is what lets a kubectl `get` rule treat `-o yaml`
+/// (prune) differently from `-o json` (pass through byte-exact).
+fn flag_matches(spec: &str, args: &[String]) -> bool {
+    match spec.split_once(char::is_whitespace) {
+        None => args.iter().any(|a| {
+            a == spec || a.split_once('=').is_some_and(|(name, _)| name == spec)
         }),
+        Some((flag, value)) => {
+            let value = value.trim();
+            args.windows(2).any(|w| w[0] == flag && w[1] == value)
+                || args.iter().any(|a| a == &format!("{flag}={value}"))
+                || (flag.len() == 2 && args.iter().any(|a| a == &format!("{flag}{value}")))
+        }
     }
 }
 
@@ -2402,6 +2422,25 @@ diff:
         let stats = vec!["--statistics".to_string()];
         let ctx = ExecCtx { sub: "diff", level: Level::Full, exit_code: 0, args: &stats };
         assert_eq!(execute(&rs, &ctx, "1\n2\n3\n").unwrap(), "1\n2\n");
+    }
+
+    #[test]
+    fn flag_guard_matches_flag_with_value() {
+        // `-o yaml` must fire on the two-token form, `-o=yaml`, and glued
+        // `-oyaml` — but NOT on `-o json`. This lets the kubectl get rule
+        // prune `-o yaml` while passing `-o json` through byte-exact.
+        let rs = parse_ok("get:\n    if -o yaml: head 1\n    else: raw\n");
+        let input = "a\nb\nc\n";
+        let cases = [
+            (vec!["-o".to_string(), "yaml".to_string()], "a\n"),
+            (vec!["-o=yaml".to_string()], "a\n"),
+            (vec!["-oyaml".to_string()], "a\n"),
+            (vec!["-o".to_string(), "json".to_string()], input), // else → raw
+        ];
+        for (args, want) in cases {
+            let ctx = ExecCtx { sub: "get", level: Level::Full, exit_code: 0, args: &args };
+            assert_eq!(execute(&rs, &ctx, input).unwrap(), want, "args={args:?}");
+        }
     }
 
     #[test]

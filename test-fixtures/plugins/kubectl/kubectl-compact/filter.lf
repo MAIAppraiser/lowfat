@@ -43,12 +43,19 @@ define clean-yaml:
             print("---")
 
 # ── get ───────────────────────────────────────────────────────────
-# clean-yaml self-detects YAML vs. plain tables, so no conditional
-# dispatch needed — table output passes through unchanged. But `-o json`
-# (and friends) must reach a downstream parser byte-exact: clean-yaml would
-# re-serialize JSON as YAML and `head` would truncate it, so pass through raw.
+# `-o yaml` is the case clean-yaml exists for — prune the server-side noise.
+# Any other explicit format (`-o json`, `jsonpath`, `name`, …) is headed for a
+# downstream parser (`| jq`) and must stay byte-exact, so pass it through raw:
+# clean-yaml would re-serialize JSON as YAML and `head` would truncate it.
+# No `-o` at all → default table, which clean-yaml passes through unchanged.
 get:
-    if -o:
+    if -o yaml:
+        clean-yaml
+        head 200
+    elif --output yaml:
+        clean-yaml
+        head 200
+    elif -o:
         raw
     elif --output:
         raw
