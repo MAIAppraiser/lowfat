@@ -1458,7 +1458,12 @@ fn atom_matches(a: &Atom, ctx: &ExecCtx) -> bool {
         Atom::Exit(ExitMatch::Ok) => ctx.exit_code == 0,
         Atom::Exit(ExitMatch::Failed) => ctx.exit_code != 0,
         Atom::Level(l) => *l == ctx.level,
-        Atom::Flag(f) => ctx.args.iter().any(|arg| arg == f),
+        // Exact token, or the `--flag=value` / `-o=value` form — a guard for
+        // `-o` / `--output` must also fire on `--output=json`. Split on `=`
+        // (not a prefix match) so `--stat` never matches `--statistics`.
+        Atom::Flag(f) => ctx.args.iter().any(|arg| {
+            arg == f || arg.split_once('=').is_some_and(|(name, _)| name == f)
+        }),
     }
 }
 
@@ -2369,6 +2374,34 @@ diff:
         assert_eq!(execute(&rs, &ultra_stat, input).unwrap(), "1\n");
         assert_eq!(execute(&rs, &full_stat, input).unwrap(), "1\n2\n");
         assert_eq!(execute(&rs, &plain, input).unwrap(), "1\n2\n3\n");
+    }
+
+    #[test]
+    fn flag_guard_matches_equals_value_form() {
+        // A `--output` guard must fire on both `--output json` (two tokens)
+        // and `--output=json` (one token). Used so kubectl `get -o json`
+        // bypasses line-truncation that would corrupt the JSON for jq.
+        let rs = parse_ok("get:\n    if --output: raw\n    else: head 1\n");
+        let input = "{\n  \"a\": 1\n}\n";
+        let split = vec!["--output".to_string(), "json".to_string()];
+        let glued = vec!["--output=json".to_string()];
+        let none = vec!["pods".to_string()];
+        let split_ctx = ExecCtx { sub: "get", level: Level::Full, exit_code: 0, args: &split };
+        let glued_ctx = ExecCtx { sub: "get", level: Level::Full, exit_code: 0, args: &glued };
+        let none_ctx = ExecCtx { sub: "get", level: Level::Full, exit_code: 0, args: &none };
+        assert_eq!(execute(&rs, &split_ctx, input).unwrap(), input);
+        assert_eq!(execute(&rs, &glued_ctx, input).unwrap(), input);
+        // No output flag → compaction (head 1) still applies.
+        assert_eq!(execute(&rs, &none_ctx, input).unwrap(), "{\n");
+    }
+
+    #[test]
+    fn flag_guard_equals_does_not_prefix_match() {
+        // `--stat` must NOT match `--statistics` — the `=` split guards this.
+        let rs = parse_ok("diff:\n    if --stat: head 1\n    else: head 2\n");
+        let stats = vec!["--statistics".to_string()];
+        let ctx = ExecCtx { sub: "diff", level: Level::Full, exit_code: 0, args: &stats };
+        assert_eq!(execute(&rs, &ctx, "1\n2\n3\n").unwrap(), "1\n2\n");
     }
 
     #[test]

@@ -44,10 +44,17 @@ define clean-yaml:
 
 # ── get ───────────────────────────────────────────────────────────
 # clean-yaml self-detects YAML vs. plain tables, so no conditional
-# dispatch needed — table output passes through unchanged.
+# dispatch needed — table output passes through unchanged. But `-o json`
+# (and friends) must reach a downstream parser byte-exact: clean-yaml would
+# re-serialize JSON as YAML and `head` would truncate it, so pass through raw.
 get:
-    clean-yaml
-    head 200
+    if -o:
+        raw
+    elif --output:
+        raw
+    else:
+        clean-yaml
+        head 200
 
 # ── logs ──────────────────────────────────────────────────────────
 logs:
