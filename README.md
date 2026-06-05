@@ -18,19 +18,6 @@ lowfat is a lightweight CLI tool that reduces AI token costs by filtering unnece
 - **Composable** — UNIX-style pipes, mix built-ins and your own filters; not magic.
 - **User-owned** — `lowfat history` shows what you run most; allow you to customize for your usecase.
 
-### Token savings
-
-Aggregated from real local usage (`lowfat stats`):
-
-| Command          | Raw     | Filtered | Saved   |
-| ---------------- | ------- | -------- | ------- |
-| `grep`           | 1.4Mt   | 29.5Kt   | **98%** |
-| `docker`         | 693.6Kt | 27.2Kt   | **96%** |
-| `kubectl get`    | 1.4Mt   | 60.3Kt   | **96%** |
-| `find`           | 196.1Kt | 13.3Kt   | **93%** |
-| `docker compose` | 21.5Kt  | 2.3Kt    | **89%** |
-| `git log`        | 37.6Kt  | 9Kt      | **76%** |
-
 ### Install
 
 ```sh
