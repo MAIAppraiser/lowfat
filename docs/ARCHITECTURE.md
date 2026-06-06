@@ -50,5 +50,6 @@ High-level view of how `lowfat` filters command output between you and your AI a
   the bundled one.
 - **Builtins** — in-process processors (`strip-ansi`, `head`, `grep`,
   `dedup-blank`, `normalize`, …) used as pipeline stages.
-- **SQLite metrics** — `~/.lowfat/data/` tracks token savings and invocation
-  history (powers `lowfat stats` and `lowfat history`).
+- **SQLite metrics** — `$XDG_DATA_HOME/lowfat` (default `~/.local/share/lowfat`,
+  override with `$LOWFAT_DATA`) holds `history.db`, tracking token savings and
+  invocation history (powers `lowfat stats` and `lowfat history`).
