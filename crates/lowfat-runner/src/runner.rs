@@ -113,7 +113,7 @@ pub fn execute_pipeline(
     // JSON guard: a filter that broke parsable output is worse than verbose
     // output — re-compact from the parsed tree instead.
     if let Some(fixed) = lowfat_core::structured::guard_json(raw, &out, input_template.level) {
-        return Ok(fixed);
+        return Ok(proc_normalize(&fixed));
     }
     Ok(out)
 }

@@ -79,9 +79,14 @@ fn prune(v: &Value, level: Level) -> Value {
         Value::Object(map) => {
             Value::Object(map.iter().map(|(k, x)| (k.clone(), prune(x, level))).collect())
         }
-        Value::String(s) if s.chars().count() > max_str => {
-            let cut: String = s.chars().take(max_str).collect();
-            Value::String(format!("{cut}... (+{} chars)", s.chars().count() - max_str))
+        Value::String(s) => {
+            let n = s.chars().count();
+            if n > max_str {
+                let cut: String = s.chars().take(max_str).collect();
+                Value::String(format!("{cut}... (+{} chars)", n - max_str))
+            } else {
+                v.clone()
+            }
         }
         other => other.clone(),
     }
@@ -116,13 +121,14 @@ fn recompact(shape: &Shape, level: Level) -> Option<String> {
 /// re-validated version built from the raw tree. None = keep `filtered`.
 pub fn guard_json(raw: &str, filtered: &str, level: Level) -> Option<String> {
     let shape = analyze(raw)?;
-    // Still JSON-shaped (e.g. passthrough, or grep over NDJSON) → keep it.
-    if analyze(filtered).is_some() {
+    // Empty is a deliberate filter result (e.g. grep with no matches), and
+    // still-JSON-shaped output (passthrough, grep over NDJSON) is fine.
+    if filtered.trim().is_empty() || analyze(filtered).is_some() {
         return None;
     }
     // Re-parse before it reaches the agent; raw is JSON-shaped by premise.
     match recompact(&shape, level) {
-        Some(out) if analyze(&out).is_some() => Some(out + "\n"),
+        Some(out) if analyze(&out).is_some() => Some(out),
         _ => Some(raw.to_string()),
     }
 }
@@ -161,11 +167,10 @@ mod tests {
     }
 
     #[test]
-    fn empty_filtered_json_is_recompacted() {
-        let raw = big_array_json(3);
-        let fixed = guard_json(&raw, "", Level::Full).unwrap();
-        assert!(is_valid_json(&fixed));
-        assert!(fixed.contains("\"id\":0"));
+    fn empty_filtered_output_is_respected() {
+        // a filter dropping everything is deliberate, not broken structure
+        assert!(guard_json(&big_array_json(3), "", Level::Full).is_none());
+        assert!(guard_json(&ndjson(5), "\n", Level::Full).is_none());
     }
 
     #[test]

@@ -31,12 +31,12 @@ where small invocations dominate:
    `Acked-by:`, `Tested-by:`, `Reported-by:`, `Cc:` are dropped; the 40-hex
    commit hash is shortened to 12-hex (decoration like `(HEAD -> main)` is
    preserved). Helps every `git show` / `git log` row.
-4. **Honest truncation + uncapped lite** (v0.6.10) — when the diff cap
-   hits, a tail marker reports how many files/lines were cut instead of
-   ending silently (silent truncation misleads the LLM reader). `lite` is
-   now the escape hatch the marker points at: no line cap, every
-   hunk/change/context line kept, with only redundant pre-hunk meta
-   (`index`/mode/`---`/`+++`) and blank context lines dropped (~3% on an
-   add-heavy diff, more with many files or renames). The marker costs
-   ~30t on capped diffs; the old behaviour hid thousands of changed lines
-   with no indication.
+4. **Honest truncation + uncapped lite** (lowfat v0.6.10, plugin v0.5.6) —
+   when the diff cap hits, a tail marker reports how many files/lines were
+   cut instead of ending silently (silent truncation misleads the LLM
+   reader). `lite` is now the escape hatch the marker points at: no line
+   cap, every hunk/change/context line kept, with only redundant pre-hunk
+   meta (`index`/mode/rename/copy/similarity/`---`/`+++`) and blank
+   context lines dropped (~3% on an add-heavy diff, more with many files
+   or renames). The marker costs ~30t on capped diffs; the old behaviour
+   hid thousands of changed lines with no indication.
