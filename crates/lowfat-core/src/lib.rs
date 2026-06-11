@@ -4,5 +4,6 @@ pub mod level;
 pub mod lf;
 pub mod pipeline;
 pub mod redact;
+pub mod structured;
 pub mod tee;
 pub mod tokens;

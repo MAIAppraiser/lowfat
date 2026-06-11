@@ -177,9 +177,48 @@ fn git_diff_large_input_no_broken_pipe() {
 
     let out = run_lf(&plugin.join("filter.lf"), &large, "diff", Level::Full);
 
-    // must stay at the 200-line cap, not fall back to the raw stream
+    // 200-line cap + 1 truncation marker, no raw fallback
     let lines = out.lines().count();
-    assert!(lines <= 200, "output not compacted: {lines} lines");
+    assert!(lines <= 201, "output not compacted: {lines} lines");
+}
+
+// Capped diffs must say so — silent truncation misleads the LLM reader.
+// Lite is uncapped, dropping only pre-hunk meta and blank context lines.
+#[test]
+fn git_diff_truncation_marker_and_lite_uncapped() {
+    let plugin = bundled_dir().join("git/git-compact");
+    let sample = std::fs::read_to_string(plugin.join("samples/git-diff-full.txt")).unwrap();
+
+    // sample compacts to >200 lines at full, so the marker must fire
+    let full = run_lf(&plugin.join("filter.lf"), &sample, "diff", Level::Full);
+    assert!(
+        full.contains("git-compact: truncated"),
+        "no truncation marker at full:\n{full}"
+    );
+
+    let lite = run_lf(&plugin.join("filter.lf"), &sample, "diff", Level::Lite);
+    assert!(!lite.contains("git-compact: truncated"), "lite must not cap");
+
+    // every hunk header and changed line survives (--- / +++ are meta)
+    let hunks = |s: &str| s.lines().filter(|l| l.starts_with("@@ ")).count();
+    let changes = |s: &str| {
+        s.lines()
+            .filter(|l| {
+                (l.starts_with('+') && !l.starts_with("+++ "))
+                    || (l.starts_with('-') && !l.starts_with("--- "))
+            })
+            .count()
+    };
+    assert_eq!(hunks(&lite), hunks(&sample));
+    assert_eq!(changes(&lite), changes(&sample));
+
+    // redundant pre-hunk meta is gone
+    assert!(!lite.contains("\nindex "), "index meta should be dropped");
+    assert!(!lite.contains("\n--- a/"), "--- meta should be dropped");
+
+    // sh baseline must agree
+    let sh_lite = run_sh(&plugin.join("filter.sh"), &sample, "git", "diff", Level::Lite);
+    assert_eq!(sh_lite.lines().count(), lite.lines().count());
 }
 
 #[test]

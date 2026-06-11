@@ -108,7 +108,14 @@ pub fn execute_pipeline(
     }
 
     // Final cleanup: trim trailing whitespace, collapse blank lines
-    Ok(proc_normalize(&text))
+    let out = proc_normalize(&text);
+
+    // JSON guard: a filter that broke parsable output is worse than verbose
+    // output — re-compact from the parsed tree instead.
+    if let Some(fixed) = lowfat_core::structured::guard_json(raw, &out, input_template.level) {
+        return Ok(proc_normalize(&fixed));
+    }
+    Ok(out)
 }
 
 /// Execute a command and capture its output.
@@ -189,6 +196,19 @@ mod tests {
         // Should be ANSI-stripped AND truncated
         assert!(!result.contains("\x1b["));
         assert!(result.lines().count() <= 41);
+    }
+
+    #[test]
+    fn json_output_never_truncated_mid_structure() {
+        // `head` would cut this pretty-printed array mid-structure; the
+        // guard must re-compact it into valid JSON instead.
+        let items: Vec<String> = (0..100).map(|i| format!("{{\"id\": {i}}}")).collect();
+        let raw = format!("[\n  {}\n]", items.join(",\n  "));
+        let pipeline = Pipeline::parse("head");
+        let input = make_input(&raw);
+        let result = execute_pipeline(&pipeline, &raw, &input, &HashMap::new()).unwrap();
+        assert!(serde_json::from_str::<serde_json::Value>(&result).is_ok(), "broken JSON: {result}");
+        assert!(result.contains("more items"));
     }
 
     #[test]

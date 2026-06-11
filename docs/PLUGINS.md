@@ -161,17 +161,25 @@ define abbrev-hash:
 define compact-diff(limit):
     shell: |
         awk -v lim=$1 -v lvl=$level '
-          BEGIN { in_hunk=0; n=0 }
-          n>=lim { exit }
-          /^diff / { in_hunk=0; print; n++; next }
+          BEGIN { in_hunk=0; n=0; xf=0; xl=0 }
+          /^diff / { in_hunk=0
+                     if (n>=lim) { xf++; next }
+                     print; n++; next }
           /^@@ /  { in_hunk=1
+                    if (n>=lim) { xl++; next }
                     if (lvl=="ultra" && match($0,/ @@/))
                         print substr($0,1,RSTART+2)
                     else print
                     n++; next }
           lvl=="ultra" { next }
-          in_hunk && /^[+-]/ { print; n++ }
+          in_hunk && /^[+-]/ { if (n>=lim) { xl++; next }
+                               print; n++ }
+          END { if (xf || xl)
+                    printf "... [git-compact: truncated; %d more files, %d more lines omitted - use LOWFAT_LEVEL=lite for the full diff]\n", xf, xl }
         '
+
+define drop-index-meta:
+    drop /^(index [0-9a-f]+\.\.[0-9a-f]+( [0-7]+)?$|(new file mode |deleted file mode |old mode |new mode |similarity index |dissimilarity index |rename from |rename to |copy from |copy to |---|\+\+\+) )/
 
 status:
     keep /^\t/                      # long-format file entries are tab-indented
@@ -185,8 +193,8 @@ diff:
         compact-diff 30
         or-shell: awk 'NF' | head -50
     elif level lite:
-        compact-diff 400
-        or-shell: awk 'NF' | head -50
+        drop-index-meta              # escape hatch: no caps, only redundant
+        drop /^ ?[[:space:]]*$/      # meta + blank context lines dropped
     else:
         compact-diff 200
         or-shell: awk 'NF' | head -50

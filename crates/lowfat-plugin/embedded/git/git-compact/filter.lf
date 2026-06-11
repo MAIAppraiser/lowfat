@@ -11,20 +11,31 @@ define abbrev-hash:
 
 # State machine: drop pre-hunk metadata (--- +++ index mode), drop
 # unchanged context, strip @@ function-context tail when ultra.
+# Past the cap, keep counting so the tail marker reports what was cut.
 define compact-diff(limit):
     shell: |
         awk -v lim=$1 -v lvl=$level '
-          BEGIN { in_hunk=0; n=0 }
-          n>=lim { exit }
-          /^diff / { in_hunk=0; print; n++; next }
+          BEGIN { in_hunk=0; n=0; xf=0; xl=0 }
+          /^diff / { in_hunk=0
+                     if (n>=lim) { xf++; next }
+                     print; n++; next }
           /^@@ /  { in_hunk=1
+                    if (n>=lim) { xl++; next }
                     if (lvl=="ultra" && match($0,/ @@/))
                         print substr($0,1,RSTART+2)
                     else print
                     n++; next }
           lvl=="ultra" { next }
-          in_hunk && /^[+-]/ { print; n++ }
+          in_hunk && /^[+-]/ { if (n>=lim) { xl++; next }
+                               print; n++ }
+          END { if (xf || xl)
+                    printf "... [git-compact: truncated; %d more files, %d more lines omitted - use LOWFAT_LEVEL=lite for the full diff]\n", xf, xl }
         '
+
+# Pre-hunk meta duplicates the `diff --git` path. `index` may end without
+# a mode, hence own anchor; --- / +++ keep the space guard for `--` lines.
+define drop-index-meta:
+    drop /^(index [0-9a-f]+\.\.[0-9a-f]+( [0-7]+)?$|(new file mode |deleted file mode |old mode |new mode |similarity index |dissimilarity index |rename from |rename to |copy from |copy to |---|\+\+\+) )/
 
 # ── status ────────────────────────────────────────────────────────
 # File entries: long-format indents them with a tab; short/porcelain (`-s`)
@@ -48,6 +59,7 @@ status:
             or "git status: clean"
 
 # ── diff ──────────────────────────────────────────────────────────
+# Lite: uncapped, drops only pre-hunk meta + blank context lines.
 diff:
     if exit failed:
         raw
@@ -55,8 +67,8 @@ diff:
         compact-diff 30
         or-shell: awk 'NF' | head -50
     elif level lite:
-        compact-diff 400
-        or-shell: awk 'NF' | head -50
+        drop-index-meta
+        drop /^ ?[[:space:]]*$/
     else:
         compact-diff 200
         or-shell: awk 'NF' | head -50
@@ -79,12 +91,7 @@ log:
             head 25
 
 # ── show ──────────────────────────────────────────────────────────
-# Lite is permissive — preserve full context (incl. unchanged lines); only
-# strip trailers + abbreviate the hash, and drop pre-hunk index/mode meta
-# which always duplicates the path already on `diff --git`.
-define drop-index-meta:
-    drop /^(index [0-9a-f]+\.\.[0-9a-f]+( [0-7]+)?|new file mode |deleted file mode |old mode |new mode |similarity index |dissimilarity index |rename from |rename to |copy from |copy to |---|\+\+\+) /
-
+# Lite is permissive — only trailers and pre-hunk meta are dropped.
 show:
     match level:
         ultra:
