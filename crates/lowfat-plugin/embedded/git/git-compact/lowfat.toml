@@ -1,6 +1,6 @@
 [plugin]
 name = "git-compact"
-version = "0.5.5"
+version = "0.5.6"
 description = "Compact git status/diff/log/show output for LLM contexts"
 commands = ["git"]
 subcommands = ["status", "diff", "log", "show"]
