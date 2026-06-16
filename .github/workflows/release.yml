@@ -82,35 +82,28 @@ jobs:
       - name: Build and test
         run: cargo test --workspace
 
-      # Publish in dependency order: core → plugin → runner → cli
-      - name: Publish lowfat-core
-        run: cargo publish -p lowfat-core
+      # Publish in dependency order. Idempotent: skip crates already on crates.io
+      # so a re-run after a partial failure completes the release instead of erroring.
+      - name: Publish crates
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-      - name: Wait for index
-        run: sleep 30
-
-      - name: Publish lowfat-plugin
-        run: cargo publish -p lowfat-plugin
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-      - name: Wait for index
-        run: sleep 30
-
-      - name: Publish lowfat-runner
-        run: cargo publish -p lowfat-runner
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-      - name: Wait for index
-        run: sleep 30
-
-      - name: Publish lowfat
-        run: cargo publish -p lowfat
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -u
+          publish() {
+            if cargo publish -p "$1" 2>err.log; then
+              cat err.log; echo "published $1"
+            elif grep -qiE "already (uploaded|exists)" err.log; then
+              cat err.log; echo "$1 already on crates.io — skipping"
+            else
+              cat err.log; echo "::error::publish $1 failed"; return 1
+            fi
+          }
+          # deps first, then the CLI; sleep lets the index catch up for dependents
+          for c in lowfat-core lowfat-compress lowfat-plugin lowfat-runner; do
+            publish "$c" || exit 1
+            sleep 30
+          done
+          publish lowfat
 
   github-release:
     needs: [build]
@@ -127,10 +120,12 @@ jobs:
 
       - name: Create GitHub Release
         run: |
+          # Idempotent: if the release already exists, refresh its assets instead of failing
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
             --generate-notes \
-            artifacts/*.tar.gz
+            artifacts/*.tar.gz \
+            || gh release upload "$GITHUB_REF_NAME" artifacts/*.tar.gz --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
